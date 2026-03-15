@@ -12,48 +12,80 @@ Turns [Wezterm](https://wezfurlong.org/wezterm/) into a remote-controllable term
 - **Manage windows** — one window per project, auto-titled, with N/M numbering for duplicates
 - **Session recovery** — save/restore full layouts including CLI session IDs after a crash
 - **Auto-skip permissions** — each CLI's autonomous mode is handled automatically
+- **Cross-platform** — Linux, macOS, and Windows via a platform abstraction layer
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│              Your AI Agent (Claude, etc.)                │
-│                                                         │
-│  "Launch 5 Claude agents for the auth-service project"  │
-│                         │                               │
-│                    MCP Tool Calls                       │
-│                         │                               │
-├─────────────────────────┼───────────────────────────────┤
-│                  wezterm-mcp                             │
-│              (this MCP server)                          │
-│                         │                               │
-│              wezterm cli commands                       │
-│                         │                               │
-├─────────────────────────┼───────────────────────────────┤
-│                    Wezterm                              │
-│                                                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-│  │ Window 1 │  │ Window 2 │  │ Window 3 │              │
-│  │ auth-svc │  │ pay-api  │  │ dashboard│              │
-│  │ ┌──┬──┐  │  │ ┌──┬──┐  │  │ ┌──┐     │              │
-│  │ │C1│C2│  │  │ │C1│G1│  │  │ │C1│     │              │
-│  │ ├──┼──┤  │  │ └──┴──┘  │  │ └──┘     │              │
-│  │ │C3│C4│  │  │          │  │          │              │
-│  │ └──┴──┘  │  │          │  │          │              │
-│  └──────────┘  └──────────┘  └──────────┘              │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│              Your AI Agent (Claude, etc.)            │
+│                                                     │
+│  "Launch 5 Claude agents for the auth-service project"│
+│                         │                           │
+│                    MCP Tool Calls                   │
+│                         │                           │
+├─────────────────────────┼───────────────────────────┤
+│                  wezterm-mcp                        │
+│              (this MCP server)                      │
+│                         │                           │
+│              wezterm cli commands                   │
+│                         │                           │
+├─────────────────────────┼───────────────────────────┤
+│                    Wezterm                          │
+│                                                     │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐          │
+│  │ Window 1 │  │ Window 2 │  │ Window 3 │          │
+│  │ auth-svc │  │ pay-api  │  │ dashboard│          │
+│  │ ┌──┬──┐  │  │ ┌──┬──┐  │  │ ┌──┐     │          │
+│  │ │C1│C2│  │  │ │C1│G1│  │  │ │C1│     │          │
+│  │ ├──┼──┤  │  │ └──┴──┘  │  │ └──┘     │          │
+│  │ │C3│C4│  │  │          │  │          │          │
+│  │ └──┴──┘  │  │          │  │          │          │
+│  └──────────┘  └──────────┘  └──────────┘          │
+└─────────────────────────────────────────────────────┘
 ```
 
 ## Installation
 
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) (v18+)
+- [Wezterm](https://wezfurlong.org/wezterm/installation)
+
+### Setup
+
 ```bash
+git clone https://github.com/multiagentcognition/wezterm-mcp.git
+cd wezterm-mcp
 npm install
 npm run build
 ```
 
+### Wezterm Lua Config
+
+Copy `wezterm.lua` to your Wezterm config directory:
+
+```bash
+# Linux
+cp wezterm.lua ~/.config/wezterm/wezterm.lua
+
+# macOS
+cp wezterm.lua ~/.config/wezterm/wezterm.lua
+
+# Windows
+copy wezterm.lua %USERPROFILE%\.config\wezterm\wezterm.lua
+```
+
+It provides:
+- **Auto-maximize** on startup
+- **Window titles** derived from project directory
+- **N/M numbering** for multiple windows of the same project
+- **Tab titles** auto-derived from pane CLI contents (e.g., "Claude (3) + shell")
+- **F11** toggles fullscreen
+
 ## Configuration
 
-Add to your `.mcp.json`:
+Add to your MCP client config (e.g., `.mcp.json`, Claude Code settings, etc.):
 
 ```json
 {
@@ -77,230 +109,167 @@ Add to your `.mcp.json`:
 | `MACP_PROJECT_ROOT` | Fallback if `WEZ_PROJECT_ROOT` not set | — |
 | `WEZ_GIT_BRANCH` | Informational git branch (not enforced) | auto-detected |
 
-## Wezterm Lua Config
-
-Copy `wezterm.lua` to `~/.config/wezterm/wezterm.lua`. It provides:
-
-- **Auto-maximize** on startup
-- **Window titles** derived from project directory (not overridden by CLI pane titles)
-- **N/M numbering** for multiple windows of the same project (e.g., "WABro 1/2", "WABro 2/2")
-- **Tab titles** auto-derived from pane contents (e.g., "Claude (3) + shell")
-- **F11** toggles fullscreen
-
 ## Supported CLIs
 
 | CLI | Binary | Skip-permissions | Session resume |
 |---|---|---|---|
 | **Claude Code** | `claude` | `--dangerously-skip-permissions` | `--resume <session-id>` or `--continue` |
-| **Gemini CLI** | `gemini` | `--sandbox=none` | `--resume <session-id>` or `--resume` |
-| **Codex CLI** | `codex` | `--approval-mode full-auto` | `codex resume <session-id>` or `resume --last` |
-| **OpenCode** | `opencode` | Config: `~/.config/opencode/opencode.json` → `"permission": "allow"` | `--session <id>` or `--continue` |
+| **Gemini CLI** | `gemini` | `--sandbox=none` | `--resume latest` |
+| **Codex CLI** | `codex` | `-a never` | `codex resume <session-id>` or `resume --last` |
+| **OpenCode** | `opencode` | Config: `permission: "allow"` | `--session <id>` or `--continue` |
 | **Goose** | `goose` | Env: `GOOSE_MODE=auto` | `goose session --resume --session-id <id>` |
 
-### Permission Handling
+Each CLI's autonomous mode is handled automatically — flags, config files, and env vars are set before launch. Directory trust is pre-configured for Claude Code, Gemini, and Codex so no interactive prompts block startup.
 
-Each CLI has a different mechanism for autonomous mode. The MCP handles all of them automatically:
+## MCP Tools (41 total)
 
-- **CLI flags** (Claude, Gemini, Codex): appended to the spawn command
-- **Config file** (OpenCode): `~/.config/opencode/opencode.json` is created/updated with `"permission": "allow"` before launch
-- **Environment variable** (Goose): `GOOSE_MODE=auto` is set via `bash -c` wrapper
-
-## MCP Tools
-
-### Lifecycle
+### Status & Lifecycle
 
 | Tool | Description |
 |---|---|
-| `wez_status` | Check if Wezterm is installed/running. Shows all windows, tabs, panes with CLI detection and state (idle/ready/working/exited). |
-| `wez_start` | Explicitly start Wezterm if not running. |
-| `wez_list` | List all panes with detected CLI type and state. |
+| `wez_status` | Full status: windows, tabs, panes with CLI detection and state |
+| `wez_list` | List all panes with CLI type, state, CWD |
+| `wez_start` | Start Wezterm if not running |
 
 ### Launching
 
 | Tool | Description |
 |---|---|
-| `wez_launch_agents` | Open a project window. Optionally launch N agents with auto-grid layout. One window per project (unless `new_window: true`). |
-| `wez_launch_mixed` | Launch agents with different CLIs in one tab (e.g., 2 Claude + 1 Gemini). |
-| `wez_launch_grid` | Create a manual grid of panes with a specific command. |
-| `wez_spawn` | Spawn a single new tab with an optional command. |
-| `wez_split` | Split an existing pane horizontally or vertically. |
+| `wez_launch_agents` | Open a project window with N agents (auto-grid layout) |
+| `wez_launch_mixed` | Multiple different CLIs in one tab |
+| `wez_launch_grid` | Manual grid of panes (rows × cols) |
+| `wez_spawn` | New window/tab with optional CLI or command |
+| `wez_split` | Split a pane (right/bottom) with optional CLI |
 
 ### Text I/O
 
 | Tool | Description |
 |---|---|
-| `wez_send_text` | Type text into a pane (no Enter). |
-| `wez_send_text_submit` | Type text + press Enter. The key method for injecting prompts into CLI agents. Uses `--no-paste` + `\x0d`. |
-| `wez_send_text_all` | Send different texts to each pane in a tab. |
-| `wez_send_text_submit_all` | Broadcast same text to all panes in a tab. |
-| `wez_send_text_submit_some` | Send text to specific pane IDs (subset). |
-| `wez_get_text` | Read text from a pane. Supports scrollback with negative `start_line`. |
+| `wez_send_text` | Type text into a pane (no Enter) |
+| `wez_send_text_submit` | Type text + Enter (primary method for injecting prompts) |
+| `wez_send_text_all` | Different text to each pane in a tab |
+| `wez_send_text_submit_all` | Broadcast same text to all panes in a tab |
+| `wez_send_text_submit_some` | Send text to specific pane IDs |
+| `wez_get_text` | Read text from a pane (supports scrollback) |
 
-### Reading / Monitoring
+### Reading & Monitoring
 
 | Tool | Description |
 |---|---|
-| `wez_read_all` | **Quick passive read** of ALL panes across ALL windows and tabs. Does NOT interact with agents. Fast and safe. |
-| `wez_read_all_deep` | **Deep read** — for idle CLI agents, prompts each one asking "what have you done?". For busy agents, reads output without interrupting. Returns agent summaries. |
-| `wez_read_tab` | Read output from all panes in a specific tab. |
+| `wez_read_all` | Quick passive read of ALL panes — fast, never interrupts |
+| `wez_read_all_deep` | Deep read — prompts idle agents for status summaries |
+| `wez_read_tab` | Read all panes in a specific tab |
+| `wez_screenshot` | Screenshot the active Wezterm window |
+| `wez_screenshot_all_tabs` | Screenshot each tab |
 
 ### Special Keys
 
 | Tool | Description |
 |---|---|
-| `wez_send_key` | Send special keys: `ctrl+c`, `ctrl+d`, `escape`, `tab`, `enter`, arrow keys, etc. |
-| `wez_send_key_all` | Send a key to ALL panes in a tab (e.g., `ctrl+c` to cancel all agents). |
+| `wez_send_key` | Send ctrl+c, ctrl+d, escape, enter, arrow keys, etc. |
+| `wez_send_key_all` | Send a key to all panes in a tab |
 
 ### Navigation & Layout
 
 | Tool | Description |
 |---|---|
-| `wez_focus_pane` | Focus a specific pane by ID. |
-| `wez_focus_direction` | Focus pane in a direction (Up/Down/Left/Right). |
-| `wez_focus_tab` | Switch to a tab by index. |
-| `wez_resize_pane` | Resize a pane in a direction. |
-| `wez_zoom_pane` | Toggle zoom (maximize/restore) on a pane. |
-| `wez_move_to_tab` | Move a pane into its own new tab. |
-| `wez_fullscreen` | Toggle fullscreen mode. |
+| `wez_focus_pane` | Focus a pane by ID |
+| `wez_focus_direction` | Focus Up/Down/Left/Right |
+| `wez_focus_tab` | Switch to tab by index |
+| `wez_resize_pane` | Resize a pane |
+| `wez_zoom_pane` | Toggle zoom (maximize/restore) |
+| `wez_move_to_tab` | Move a pane into its own tab |
+| `wez_fullscreen` | Toggle fullscreen |
 
-### Metadata
-
-| Tool | Description |
-|---|---|
-| `wez_set_tab_title` | Set a tab's title. |
-| `wez_set_window_title` | Set a window's title. |
-| `wez_rename_workspace` | Rename a workspace. |
-
-### Bulk Operations
+### Titles & Workspace
 
 | Tool | Description |
 |---|---|
-| `wez_kill_pane` | Close a single pane. |
-| `wez_kill_tab` | Kill all panes in a tab. |
-| `wez_kill_all` | Kill all panes in all tabs. |
-| `wez_restart_pane` | Kill a pane and relaunch the same CLI (auto-detected). Optionally resume the session. |
+| `wez_set_tab_title` | Set a tab's title |
+| `wez_set_window_title` | Set a window's title |
+| `wez_rename_workspace` | Rename a workspace |
 
-### Screenshots
+### Pane Management
 
 | Tool | Description |
 |---|---|
-| `wez_screenshot` | Capture a screenshot of the active Wezterm window. |
-| `wez_screenshot_all_tabs` | Screenshot each tab by switching and capturing. |
+| `wez_kill_pane` | Close a single pane |
+| `wez_kill_tab` | Kill all panes in a tab |
+| `wez_kill_all` | Full shutdown (panes + GUI + mux + sockets) |
+| `wez_kill_gui` | Kill GUI process only |
+| `wez_kill_mux` | Kill mux-server only |
+| `wez_clean_sockets` | Remove stale socket files |
+| `wez_restart_pane` | Kill + relaunch same CLI in place |
 
 ### Session Recovery
 
 | Tool | Description |
 |---|---|
-| `wez_session_save` | Save current state (windows, tabs, panes, CLI types, session IDs) to `~/.macp/wez-session.json`. |
-| `wez_session_recover` | Recreate all windows/tabs/panes from the saved manifest. Resumes each CLI with its specific session ID. |
-| `wez_reconcile` | Compare saved manifest against live state. Reports disappeared, new, and changed panes. |
+| `wez_session_save` | Save state (windows, tabs, panes, CLIs, session IDs) to manifest |
+| `wez_session_recover` | Recreate full layout from manifest, resume each CLI session |
+| `wez_reconcile` | Compare manifest vs live state, report drift |
 
 ## Session Recovery — How It Works
 
 ### Session ID Capture
 
-Each CLI stores its session differently. The MCP reads session IDs from the filesystem — no terminal scraping:
+Each CLI stores sessions differently. The MCP reads session IDs from the filesystem:
 
 | CLI | Session ID Source |
 |---|---|
-| Claude | `~/.claude/sessions/{PID}.json` → `sessionId` field |
-| Gemini | `~/.gemini/tmp/{hash}/chats/` → newest UUID directory |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-{id}.jsonl` → newest file |
-| OpenCode | `~/.opencode/sessions/` → newest file |
-| Goose | `goose session list --format json --limit 1` |
+| Claude | `~/.claude/projects/{encoded}/` → session `.jsonl` files |
+| Gemini | `~/.gemini/projects.json` → slug → chats directory |
+| Codex | `~/.codex/sessions/` → rollout `.jsonl` files |
+| OpenCode | SQLite DB → session table with directory column |
+| Goose | `goose session list --format json` |
 
 ### Recovery Flow
 
-1. **Save** — `wez_session_save` captures the full hierarchy: windows → tabs → panes, with CLI type, session ID, and cwd for each pane. Stored at `~/.macp/wez-session.json`.
+1. **Save** — captures windows → tabs → panes with CLI type, session ID, and CWD
+2. **Crash** — Wezterm dies but manifest and CLI session files persist
+3. **Recover** — recreates windows/tabs/panes, validates each session ID exists on disk, resumes with `--resume <id>` or falls back to `--continue`
 
-2. **Crash** — Wezterm dies. All panes are gone. But the manifest and CLI session files persist on disk.
+## Platform Support
 
-3. **Recover** — `wez_session_recover`:
-   - Starts Wezterm if needed
-   - Creates one new window per manifest window (no cwd-based merging)
-   - Kills the default startup pane
-   - For each pane: validates the session ID exists on disk. If yes → `claude --resume <id>`. If no → `claude --continue` (falls back to latest session).
-   - Each CLI picks up its conversation history from before the crash.
+All OS-specific behavior is centralised in `src/platform.ts` with three implementations sharing a Unix base:
 
-### Session Validation
+| Concern | Linux | macOS | Windows |
+|---|---|---|---|
+| Socket dir | `/run/user/{uid}/wezterm` | `~/.local/share/wezterm` | `~/.local/share/wezterm` |
+| WezTerm binary | PATH | `/Applications/WezTerm.app/...` | `Program Files\WezTerm\` |
+| Screenshot | import/scrot/grim/gnome-screenshot | screencapture | PowerShell |
+| Process mgmt | pgrep/pkill | pgrep/pkill | tasklist/taskkill |
+| Enter key | CR (PTY translates to LF) | CR | LF (ConPTY) |
+| Shell | bash | bash | cmd.exe |
+| CLI wrapping | direct exec | direct exec | cmd.exe /c (npm shims) |
 
-Before resuming, the MCP checks if the session's `.jsonl` file exists in `~/.claude/projects/`. If not (e.g., the session was too short-lived), it falls back to `--continue` instead of erroring with "No conversation found".
+## Testing
 
-## Window Management
+The `test/` directory contains 11 test suites covering all 41 tools:
 
-### One Window Per Project
+| Test | Focus |
+|---|---|
+| `recovery-test.md` | Full session recovery (7 windows, 22 panes, 14 CLI agents) |
+| `01-startup-status.md` | Status, list, start |
+| `02-spawn-split-read.md` | Spawn, split, get_text |
+| `03-input-methods.md` | send_text, send_text_submit, send_key |
+| `04-bulk-input.md` | Broadcast, per-pane, selective send |
+| `05-navigation.md` | Focus pane, direction, tab |
+| `06-layout.md` | Resize, zoom, move_to_tab, fullscreen |
+| `07-titles-workspace.md` | Tab/window titles, workspace rename |
+| `08-reading-screenshots.md` | read_tab, read_all, read_all_deep, screenshots |
+| `09-lifecycle.md` | kill_pane, kill_tab, restart_pane, kill_gui/mux |
+| `10-launchers-sessions.md` | launch_agents, launch_grid, launch_mixed, save/recover |
 
-`wez_launch_agents` enforces one window per project directory:
-
-- If a window already exists for that cwd → adds tabs to it
-- If no window exists → creates a new one
-- `new_window: true` overrides this to force a separate window
-
-### Window Titles
-
-Derived from the working directory via a Lua `format-window-title` handler:
-
-- Single window: `macp`
-- Multiple windows same project: `WABro 1/2`, `WABro 2/2`
-- Title reads from the first pane's cwd, not the active pane (doesn't change on focus)
-
-### Tab Titles
-
-Auto-derived from pane contents:
-
-- `Claude (2)` — two Claude Code agents
-- `Claude (3) + shell` — three Claude agents and a shell
-- `Gemini + Codex` — one of each
-- `shell` — plain shell
-
-### Auto-Grid Layout
-
-`wez_launch_agents` calculates the optimal grid based on screen size:
-
-- Minimum pane size: 40 cols × 10 rows
-- If count exceeds what fits in one tab → spills to multiple tabs
-- Example: 400-col screen → max 10 columns → max 80 agents per tab
-
-## Prompt Injection — How It Works
-
-Wezterm's `send-text` command types into a pane's PTY as if a human pressed keys:
-
-```
-wezterm cli send-text --pane-id 3 --no-paste "your prompt here"
-wezterm cli send-text --pane-id 3 --no-paste $'\x0d'   # Enter key
-```
-
-The `--no-paste` flag is critical — without it, text is pasted (triggers bracketed paste mode). `\x0d` is the raw Enter key that Claude Code's TUI recognizes as "submit".
-
-This works with any CLI that accepts keyboard input. No API, no SDK, no special integration.
-
-## Git Strategy
-
-When used with MACP (Multi-Agent Cognition Protocol), all agents work on the **same branch** in the **same working directory**:
-
-- **No per-agent branches** — agents communicate via MACP, not git
-- **File claims** (`macp_ext_claim_files`) prevent edit conflicts
-- **Frequent commits + `git pull --rebase`** before pushing
-- Branch enforcement is informational, not enforced by the MCP
+Tests are designed to be run by an AI agent via MCP tool calls — each test doc describes the steps, expected outputs, and pass criteria.
 
 ## Known Limitations
 
 - **Wezterm version**: Tested with 20240203. The `format-window-title` callback parameter types vary between versions.
-- **Socket discovery**: The MCP looks for `gui-sock-*` in `/run/user/{uid}/wezterm/`. On macOS the path is different (`~/Library/Application Support/wezterm/`). Windows uses named pipes.
-- **Screenshots**: Use `import` (ImageMagick) with `xprop` fallback. macOS would need `screencapture`, Windows needs `snippingtool`.
-- **Session resume**: Only works if the CLI's session file persists on disk. Short-lived sessions that get cleaned up before save can't be resumed — falls back to `--continue`.
-- **Deep read timeout**: `wez_read_all_deep` waits up to 30 seconds per idle agent. With many agents, this can be slow.
-- **Stale mux servers**: Wezterm can leave stale mux servers running. The MCP handles this by preferring `gui-sock-*` over the default `sock`.
-
-## Platform Support
-
-| Component | Linux | macOS | Windows |
-|---|---|---|---|
-| Core MCP tools | Yes | Yes | Yes |
-| Socket discovery | `/run/user/{uid}/wezterm/` | `~/Library/...` | Named pipes |
-| Screenshots | `import`/`scrot` | `screencapture` | `snippingtool` |
-| `wez_start` | `bash` | `bash` | `cmd`/`powershell` |
-| `wez_fullscreen` | `xdotool`/F11 | Native | Native |
+- **Session resume**: Only works if the CLI's session file persists on disk. Short-lived sessions that get cleaned up before save can't be resumed.
+- **Deep read timeout**: `wez_read_all_deep` waits up to 30 seconds per idle agent.
+- **screenshot_all_tabs**: Flaky due to tab-switching timing — may capture 0 tabs.
+- **Stale mux servers**: Wezterm can leave stale mux servers. After `wez_kill_all`, use `wez_start` before spawning new panes.
 
 ## License
 

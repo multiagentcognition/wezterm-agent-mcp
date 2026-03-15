@@ -5,3 +5,4 @@ build/
 *.db-wal
 .env
 .wezterm/
+.claude/
