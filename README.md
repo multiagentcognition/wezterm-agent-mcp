@@ -271,6 +271,18 @@ Tests are designed to be run by an AI agent via MCP tool calls — each test doc
 - **screenshot_all_tabs**: Flaky due to tab-switching timing — may capture 0 tabs.
 - **Stale mux servers**: Wezterm can leave stale mux servers. After `wez_kill_all`, use `wez_start` before spawning new panes.
 
+## Disclaimer
+
+**USE AT YOUR OWN RISK.** This software launches AI coding agents in autonomous mode with permissions to read, write, and execute files on your system. By design, it bypasses each CLI's safety prompts (`--dangerously-skip-permissions`, `--sandbox=none`, `-a never`, etc.) so agents can operate without human approval of individual actions.
+
+This means:
+- Agents **can and will** modify files, run shell commands, and make network requests without asking
+- Multiple agents running in parallel can produce unexpected interactions
+- There is no undo — changes agents make to your filesystem are immediate and permanent
+- Session recovery resumes agents with full conversation context, which may include stale or incorrect instructions
+
+**Do not run this on production systems, with access to sensitive data, or in environments where unreviewed code execution is unacceptable.** Use isolated directories, sandboxed environments, or disposable VMs when possible. The authors accept no liability for any damage, data loss, or unintended consequences resulting from use of this software.
+
 ## License
 
 [PolyForm Strict 1.0.0](https://polyformproject.org/licenses/strict/1.0.0) — personal and non-commercial use only. No modifications, no commercial/enterprise use. See [LICENSE](LICENSE) for full terms.
