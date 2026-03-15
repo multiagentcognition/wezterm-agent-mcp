@@ -910,10 +910,15 @@ function projectSpawnArgs(dir: string | undefined, newWindow?: boolean): string[
 }
 
 function sendTextAndSubmit(paneId: number, text: string): void {
-  // Paste text (bracketed paste — atomic), then send Enter via keyboard mode.
-  // Both wez() calls are synchronous (execFileSync), so the paste is fully
-  // delivered before the Enter send begins. No artificial delay needed.
+  // Paste text (bracketed paste), fence, then Enter (--no-paste).
+  // The mux dispatches send_paste and write_to_pane asynchronously via
+  // spawn_into_main_thread().detach(), so two back-to-back CLI calls can
+  // have their PTY writes reordered. A get-text round-trip between them
+  // acts as a fence — the mux must deliver the paste before responding
+  // to get-text, so the subsequent Enter always arrives in a later
+  // PTY read cycle after the TUI has processed the pasted text.
   wez('send-text', '--pane-id', String(paneId), text);
+  wez('get-text', '--pane-id', String(paneId));
   wez('send-text', '--pane-id', String(paneId), '--no-paste', '\x0d');
 }
 
