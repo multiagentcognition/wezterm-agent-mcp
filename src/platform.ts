@@ -276,8 +276,8 @@ const windows: Platform = {
   name: 'windows',
   shell: true as const,
   defaultShell: 'cmd.exe',
-  enterKey: '\n',    // LF — ConPTY has no icrnl, TUIs expect LF
-  pasteSettleMs: 500, // ConPTY needs longer to flush paste buffers to TUIs
+  enterKey: '\x0d',  // CR — same as Unix; ConPTY handles it when sent via --no-paste
+  pasteSettleMs: 2000, // ConPTY needs ~2s for paste buffer to flush before TUIs accept Enter
 
   weztermBin(): string {
     const candidate = join(winWeztermDir(), 'wezterm.exe');

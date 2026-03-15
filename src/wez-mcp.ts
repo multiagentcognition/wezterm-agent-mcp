@@ -910,12 +910,14 @@ function projectSpawnArgs(dir: string | undefined, newWindow?: boolean): string[
 }
 
 function sendTextAndSubmit(paneId: number, text: string): void {
-  // Append newline to the text and paste it as a single atomic operation.
-  // TUI apps process the entire paste buffer at once, so the trailing \n
-  // is interpreted as Enter after the text — no timing issues.
-  // Previous approach (separate paste + delay + Enter) failed on Windows
-  // because ConPTY paste buffer flush timing is unpredictable.
-  wez('send-text', '--pane-id', String(paneId), text + '\n');
+  // Two-step: paste text, then send Enter separately.
+  // Bracketed paste wraps text in escape sequences so \n inside is literal —
+  // Enter MUST be a separate --no-paste send outside the paste brackets.
+  // Windows ConPTY needs ~2s for the paste buffer to fully flush before
+  // the TUI input field accepts Enter. Unix PTY is nearly instant.
+  wez('send-text', '--pane-id', String(paneId), text);
+  sleepMs(OS.pasteSettleMs);
+  wez('send-text', '--pane-id', String(paneId), '--no-paste', '\x0d');
 }
 
 /**
