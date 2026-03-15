@@ -245,17 +245,16 @@ function getSessionId(paneId: number, cli: string): string | null {
     const paneCwd = normalizeCwd(pane.cwd);
     const cliPid = getCliPid(pane.tty_name, cli);
 
-    // Count how many panes are running the same CLI type.
-    // If multiple panes share the same CLI, the filesystem-based fallback
-    // (most-recent session file) cannot distinguish between them and would
-    // return the SAME session ID for all, causing N-1 panes to crash on
-    // resume.  In that case return null so the caller uses "resume latest"
-    // mode (--continue / --resume without an ID) which is always safe.
+    // Count how many panes run the same CLI type in the SAME CWD.
+    // CWD-based session matching is safe when each instance has a unique CWD.
+    // Only when 2+ instances of the same CLI share a CWD do we bail out,
+    // since the filesystem fallback can't distinguish them.
     const sameCli = allPanes.filter(p => {
       const s = detectPaneState(p);
       return s.cli === cli;
     });
-    const multipleInstances = sameCli.length > 1;
+    const sameCliSameCwd = sameCli.filter(p => pathsEqual(normalizeCwd(p.cwd), paneCwd));
+    const multipleInstances = sameCliSameCwd.length > 1;
 
     switch (cli) {
       case 'claude': {
@@ -285,8 +284,8 @@ function getSessionId(paneId: number, cli: string): string | null {
             })
             .filter((f): f is NonNullable<typeof f> => f !== null)
             .sort((a, b) => b.mtime - a.mtime);
-          // Match by CWD first
-          const cwdMatch = files.find(f => f.cwd === paneCwd);
+          // Match by CWD first (normalize for backslash/forward-slash differences)
+          const cwdMatch = files.find(f => f.cwd && pathsEqual(f.cwd, paneCwd));
           if (cwdMatch) return cwdMatch.sessionId ?? null;
           // Global fallback (Windows or single-instance)
           if (files.length > 0) return files[0]!.sessionId ?? null;
@@ -323,7 +322,7 @@ function getSessionId(paneId: number, cli: string): string | null {
               const meta = JSON.parse(firstLine);
               if (meta.type === 'session_meta' && meta.payload?.cwd) {
                 const fileCwd = meta.payload.cwd.replace(/\/$/, '');
-                if (fileCwd === paneCwd) {
+                if (pathsEqual(fileCwd, paneCwd)) {
                   return meta.payload.id ?? null;
                 }
               }
@@ -356,7 +355,13 @@ function getSessionId(paneId: number, cli: string): string | null {
           if (existsSync(projectsFile)) {
             const raw = JSON.parse(readFileSync(projectsFile, 'utf8'));
             const mapping: Record<string, string> = raw.projects ?? raw;
+            // Try exact match first, then path-normalized match
             targetSlug = mapping[paneCwd] ?? null;
+            if (!targetSlug) {
+              for (const [path, slug] of Object.entries(mapping)) {
+                if (pathsEqual(path, paneCwd)) { targetSlug = slug; break; }
+              }
+            }
           }
 
           // Search for sessions — prioritize matching slug, fall back to all dirs
@@ -387,14 +392,22 @@ function getSessionId(paneId: number, cli: string): string | null {
           join(homedir(), '.local', 'share', 'opencode', 'opencode.db'),
           join(homedir(), '.opencode', 'opencode.db'),
         ];
+        // Try both slash variants on Windows (DB may store either format)
+        const cwdVariants = [paneCwd];
+        if (IS_WIN) {
+          const alt = paneCwd.includes('/') ? paneCwd.replace(/\//g, '\\') : paneCwd.replace(/\\/g, '/');
+          if (alt !== paneCwd) cwdVariants.push(alt);
+        }
         for (const dbPath of dbPaths) {
           if (!existsSync(dbPath)) continue;
-          try {
-            const result = execFileSync('sqlite3', [dbPath,
-              `SELECT id FROM session WHERE directory = '${paneCwd}' ORDER BY rowid DESC LIMIT 1;`
-            ], { encoding: 'utf8', timeout: 5000 }).trim();
-            if (result) return result;
-          } catch { /* ignore */ }
+          for (const cwdVar of cwdVariants) {
+            try {
+              const result = execFileSync('sqlite3', [dbPath,
+                `SELECT id FROM session WHERE directory = '${cwdVar}' ORDER BY rowid DESC LIMIT 1;`
+              ], { encoding: 'utf8', timeout: 5000 }).trim();
+              if (result) return result;
+            } catch { /* ignore */ }
+          }
         }
         // Fallback: try without CWD filter — only safe with one instance.
         if (multipleInstances) return null;
@@ -503,60 +516,61 @@ function buildResumeCommand(cli: string, sessionId: string | null, cwd?: string)
   };
 
   if (!validSessionId) {
-    // No valid session ID — use "resume latest" mode
+    // No valid session ID — try "resume latest" with fallback to fresh start.
+    // The fallback handles cases where no previous session exists in the CWD
+    // (e.g. first launch in a new directory, or temp directories).
+    const fresh = resolveCliCommand(cli, true);
     switch (cli) {
       case 'claude':
         appendFlags(base, '--continue');
-        break;
+        return wrapWithFreshFallback(base, fresh);
       case 'gemini':
-        // Gemini --resume only accepts "latest" or an index number, not UUIDs.
         appendFlags(base, '--resume', 'latest');
-        break;
-      case 'codex':
+        return wrapWithFreshFallback(base, fresh);
+      case 'codex': {
         // codex resume is a subcommand, need to restructure
+        let resumeCmd: ResolvedCommand;
         if (IS_WIN) {
           const b64r1 = Buffer.from('codex').toString('base64');
           const setVarR1 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64r1}\\x07')"`;
-          return {
+          resumeCmd = {
             parts: ['cmd.exe', '/c', `${setVarR1} && codex resume --last`],
             shellCommand: 'codex resume --last',
             needsShell: true,
           };
+        } else {
+          resumeCmd = {
+            parts: ['codex', 'resume', '--last'],
+            shellCommand: 'codex resume --last',
+            needsShell: false,
+          };
         }
-        return {
-          parts: ['codex', 'resume', '--last'],
-          shellCommand: 'codex resume --last',
-          needsShell: false,
-        };
+        return wrapWithFreshFallback(resumeCmd, fresh);
+      }
       case 'opencode':
         appendFlags(base, '--continue');
-        break;
-      case 'goose':
-        // goose session --resume is a subcommand
-        if (base.needsShell) {
+        return wrapWithFreshFallback(base, fresh);
+      case 'goose': {
+        let resumeCmd: ResolvedCommand;
+        if (IS_WIN) {
           const b64g1 = Buffer.from('goose').toString('base64');
           const setVarG1 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g1}\\x07')"`;
-          const cmd = IS_WIN
-            ? { parts: ['cmd.exe', '/c', `${setVarG1} && set GOOSE_MODE=auto && goose session --resume`], shellCommand: 'set GOOSE_MODE=auto && goose session --resume' }
-            : { parts: ['bash', '-c', 'GOOSE_MODE=auto goose session --resume'], shellCommand: 'GOOSE_MODE=auto goose session --resume' };
-          return { ...cmd, needsShell: true };
-        }
-        if (IS_WIN) {
-          const b64g1b = Buffer.from('goose').toString('base64');
-          const setVarG1b = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g1b}\\x07')"`;
-          return {
-            parts: ['cmd.exe', '/c', `${setVarG1b} && goose session --resume`],
-            shellCommand: 'goose session --resume',
+          resumeCmd = {
+            parts: ['cmd.exe', '/c', `${setVarG1} && set GOOSE_MODE=auto && goose session --resume`],
+            shellCommand: 'set GOOSE_MODE=auto && goose session --resume',
+            needsShell: true,
+          };
+        } else {
+          resumeCmd = {
+            parts: ['bash', '-c', 'GOOSE_MODE=auto goose session --resume'],
+            shellCommand: 'GOOSE_MODE=auto goose session --resume',
             needsShell: true,
           };
         }
-        return {
-          parts: ['goose', 'session', '--resume'],
-          shellCommand: 'goose session --resume',
-          needsShell: false,
-        };
+        return wrapWithFreshFallback(resumeCmd, fresh);
+      }
     }
-    return base;
+    return wrapWithFreshFallback(base, fresh);
   }
 
   // Specific session ID — use targeted resume
@@ -684,11 +698,19 @@ function ensureCliTrust(cli: string, cwd: string): void {
         try {
           content = readFileSync(configFile, 'utf8');
         } catch { /* file doesn't exist yet */ }
-        // Check if this project is already trusted
-        const sectionHeader = `[projects."${cwd}"]`;
-        if (!content.includes(sectionHeader)) {
+        // Check if this project is already trusted (handle all path variants)
+        // On Windows, CWD may have forward slashes (C:/path) or backslashes (C:\path).
+        // TOML entries may use single quotes (safe) or double quotes (breaks with backslashes).
+        const fwdCwd = cwd.replace(/\\/g, '/');
+        const bkCwd = cwd.replace(/\//g, '\\');
+        const variants = [
+          `[projects.'${fwdCwd}']`, `[projects."${fwdCwd}"]`,
+          `[projects.'${bkCwd}']`,  `[projects."${bkCwd}"]`,
+        ];
+        if (!variants.some(v => content.includes(v))) {
           mkdirSync(dirname(configFile), { recursive: true });
-          const entry = `\n${sectionHeader}\ntrust_level = "trusted"\n`;
+          // Always write single-quoted with forward slashes (safe on all platforms)
+          const entry = `\n[projects.'${fwdCwd}']\ntrust_level = "trusted"\n`;
           writeFileSync(configFile, content + entry, 'utf8');
         }
         break;
@@ -705,6 +727,28 @@ type ResolvedCommand = {
   /** Whether this needs to be run via shell (due to env vars) */
   needsShell: boolean;
 };
+
+/**
+ * Wrap a resume command with a fallback to fresh start.
+ * If the resume command exits non-zero (e.g. "no session to continue"),
+ * the fallback starts the CLI fresh instead of leaving a dead pane.
+ */
+function wrapWithFreshFallback(resume: ResolvedCommand, fresh: ResolvedCommand): ResolvedCommand {
+  const resumeInner = resume.needsShell ? resume.parts[2] : resume.parts.join(' ');
+  const freshInner = fresh.needsShell ? fresh.parts[2] : fresh.parts.join(' ');
+  if (IS_WIN) {
+    return {
+      parts: ['cmd.exe', '/c', `(${resumeInner}) || (${freshInner})`],
+      shellCommand: `${resume.shellCommand} || ${fresh.shellCommand}`,
+      needsShell: true,
+    };
+  }
+  return {
+    parts: ['bash', '-c', `${resumeInner} || ${freshInner}`],
+    shellCommand: `${resume.shellCommand} || ${fresh.shellCommand}`,
+    needsShell: true,
+  };
+}
 
 function resolveCliCommand(cli: string, skipPermissions: boolean, cwd?: string): ResolvedCommand {
   const def = CLI_DEFS[cli];
@@ -961,6 +1005,12 @@ function normalizeCwd(cwd: string): string {
     path = path.slice(1);
   }
   return path.replace(/\/$/, '') || '/';
+}
+
+/** Compare two paths ignoring slash direction and trailing slashes. */
+function pathsEqual(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return norm(a) === norm(b);
 }
 
 type PaneInfo = {
