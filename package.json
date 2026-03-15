@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Wezterm MCP Server — programmable terminal control plane for multi-agent AI workflows",
-  "license": "Apache-2.0",
+  "license": "PolyForm-Strict-1.0.0",
   "main": "./build/wez-mcp.js",
   "bin": {
     "wezterm-mcp": "build/wez-mcp.js"

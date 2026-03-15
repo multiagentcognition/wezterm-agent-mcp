@@ -273,4 +273,4 @@ Tests are designed to be run by an AI agent via MCP tool calls — each test doc
 
 ## License
 
-Apache-2.0
+[PolyForm Strict 1.0.0](https://polyformproject.org/licenses/strict/1.0.0) — personal and non-commercial use only. No modifications, no commercial/enterprise use. See [LICENSE](LICENSE) for full terms.
