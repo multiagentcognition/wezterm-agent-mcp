@@ -57,6 +57,8 @@ type CliDef = {
     path: string;
     settings: Record<string, unknown>;
   };
+  /** Pre-trust working directory so the CLI doesn't prompt on launch */
+  trustSetup?: 'gemini' | 'codex';
   /** Human-readable name */
   label: string;
 };
@@ -70,11 +72,13 @@ const CLI_DEFS: Record<string, CliDef> = {
   gemini: {
     bin: 'gemini',
     skipPermFlags: ['--sandbox=none'],
+    trustSetup: 'gemini',
     label: 'Gemini CLI',
   },
   codex: {
     bin: 'codex',
     skipPermFlags: ['-a', 'never'],
+    trustSetup: 'codex',
     label: 'Codex CLI',
   },
   opencode: {
@@ -188,43 +192,55 @@ function captureManifest(): SessionManifest {
 }
 
 /**
+ * Get the PID of the CLI process running on a pane's TTY.
+ * Handles both native binaries (claude, opencode) and Node.js CLIs
+ * (codex, gemini) which show as "node" in ps output.
+ */
+function getCliPid(ttyName: string, cli: string): string | null {
+  if (IS_WIN || !ttyName) return null;
+  const ttyShort = ttyName.replace('/dev/', '');
+  try {
+    const psOutput = execFileSync('ps', ['-t', ttyShort, '-o', 'pid,args'], {
+      encoding: 'utf8', timeout: 3000,
+    });
+    const bin = CLI_DEFS[cli]?.bin ?? cli;
+    for (const line of psOutput.split('\n')) {
+      const trimmed = line.trim();
+      // Match by binary name anywhere in the args column
+      // This catches both native binaries ("claude --flags") and
+      // Node.js CLIs ("node /path/to/codex --flags")
+      if (trimmed.includes(`/${bin}`) || trimmed.match(new RegExp(`\\b${bin}\\b`))) {
+        const pid = trimmed.split(/\s+/)[0];
+        if (pid && /^\d+$/.test(pid)) return pid;
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
  * Get session ID for a CLI running in a pane.
- * Uses filesystem-based discovery — reads the CLI's session storage
- * to find the session associated with the process on that pane's TTY.
+ * Uses per-pane PID and CWD matching to correctly identify which session
+ * belongs to which pane, even when multiple instances of the same CLI run.
  *
  * Per-CLI session storage:
- * - Claude: ~/.claude/sessions/{PID}.json → { sessionId: "uuid" }
- * - Gemini: ~/.gemini/tmp/<hash>/chats/ → newest UUID dir
- * - Codex: ~/.codex/sessions/YYYY/MM/DD/ → newest rollout file
- * - OpenCode: checks process or session listing
- * - Goose: ~/.config/goose/sessions.db (SQLite)
+ * - Claude: ~/.claude/sessions/{PID}.json → { sessionId, cwd }
+ * - Codex:  ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl → first line has session_meta with cwd
+ * - Gemini: ~/.gemini/projects.json maps CWD→slug, ~/.gemini/tmp/{slug}/chats/*.json
+ * - OpenCode: ~/.local/share/opencode/opencode.db (SQLite, session table with directory column)
+ * - Goose: goose session list --format json
  */
 function getSessionId(paneId: number, cli: string): string | null {
   try {
     const pane = listPanes().find(p => p.pane_id === paneId);
     if (!pane) return null;
 
-    // Get the CLI's PID on this pane's TTY
-    let cliPid: string | null = null;
-    if (!IS_WIN && pane.tty_name) {
-      const ttyShort = pane.tty_name.replace('/dev/', '');
-      try {
-        const psOutput = execFileSync('ps', ['-t', ttyShort, '-o', 'pid,comm'], {
-          encoding: 'utf8', timeout: 3000,
-        });
-        for (const line of psOutput.split('\n')) {
-          const trimmed = line.trim();
-          if (trimmed.includes(CLI_DEFS[cli]?.bin ?? cli)) {
-            cliPid = trimmed.split(/\s+/)[0] ?? null;
-            break;
-          }
-        }
-      } catch { /* ignore */ }
-    }
+    const paneCwd = normalizeCwd(pane.cwd);
+    const cliPid = getCliPid(pane.tty_name, cli);
 
     switch (cli) {
       case 'claude': {
-        // ~/.claude/sessions/{PID}.json contains { sessionId: "uuid" }
+        // Primary: find session by PID → ~/.claude/sessions/{PID}.json
         if (cliPid) {
           const sessionFile = join(homedir(), '.claude', 'sessions', `${cliPid}.json`);
           if (existsSync(sessionFile)) {
@@ -232,47 +248,35 @@ function getSessionId(paneId: number, cli: string): string | null {
             return data.sessionId ?? null;
           }
         }
-        // Fallback: find the most recent session file (needed on Windows where PID lookup is unavailable)
+        // Fallback: find session file matching this pane's CWD
         const sessionsDir = join(homedir(), '.claude', 'sessions');
         if (!existsSync(sessionsDir)) return null;
         try {
           const files = readdirSync(sessionsDir)
             .filter(f => f.endsWith('.json'))
-            .map(f => ({ name: f, mtime: statSync(join(sessionsDir, f)).mtimeMs }))
+            .map(f => {
+              const full = join(sessionsDir, f);
+              try {
+                const data = JSON.parse(readFileSync(full, 'utf8'));
+                return { name: f, mtime: statSync(full).mtimeMs, cwd: data.cwd, sessionId: data.sessionId };
+              } catch { return null; }
+            })
+            .filter((f): f is NonNullable<typeof f> => f !== null)
             .sort((a, b) => b.mtime - a.mtime);
-          if (files.length > 0) {
-            const data = JSON.parse(readFileSync(join(sessionsDir, files[0]!.name), 'utf8'));
-            return data.sessionId ?? null;
-          }
-        } catch { /* ignore */ }
-        return null;
-      }
-
-      case 'gemini': {
-        // Find newest chat session in ~/.gemini/
-        // Gemini stores sessions per project hash
-        const geminiDir = join(homedir(), '.gemini', 'tmp');
-        if (!existsSync(geminiDir)) return null;
-        try {
-          const projectDirs = readdirSync(geminiDir);
-          for (const projDir of projectDirs) {
-            const chatsDir = join(geminiDir, projDir, 'chats');
-            if (!existsSync(chatsDir)) continue;
-            const sessions = readdirSync(chatsDir)
-              .map(f => ({ name: f, mtime: statSync(join(chatsDir, f)).mtimeMs }))
-              .sort((a, b) => b.mtime - a.mtime);
-            if (sessions.length > 0) return sessions[0]!.name;
-          }
+          // Match by CWD first
+          const cwdMatch = files.find(f => f.cwd === paneCwd);
+          if (cwdMatch) return cwdMatch.sessionId ?? null;
+          // Global fallback (Windows or single-instance)
+          if (files.length > 0) return files[0]!.sessionId ?? null;
         } catch { /* ignore */ }
         return null;
       }
 
       case 'codex': {
-        // ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+        // Walk ~/.codex/sessions/ for rollout files, match by CWD from session_meta
         const codexDir = join(homedir(), '.codex', 'sessions');
         if (!existsSync(codexDir)) return null;
         try {
-          // Walk directory tree with Node.js fs (cross-platform, no GNU find)
           const files: { mtime: number; path: string }[] = [];
           const walk = (dir: string) => {
             for (const entry of readdirSync(dir)) {
@@ -286,27 +290,94 @@ function getSessionId(paneId: number, cli: string): string | null {
           };
           walk(codexDir);
           files.sort((a, b) => b.mtime - a.mtime);
+
+          // Try to match by CWD from session_meta in the first line
+          for (const file of files) {
+            try {
+              const firstLine = readFileSync(file.path, 'utf8').split('\n')[0];
+              if (!firstLine) continue;
+              const meta = JSON.parse(firstLine);
+              if (meta.type === 'session_meta' && meta.payload?.cwd) {
+                const fileCwd = meta.payload.cwd.replace(/\/$/, '');
+                if (fileCwd === paneCwd) {
+                  return meta.payload.id ?? null;
+                }
+              }
+            } catch { continue; }
+          }
+          // No CWD match — return newest as fallback
           if (files.length > 0) {
-            const match = files[0]!.path.match(/rollout-([^.]+)\.jsonl/);
-            return match?.[1] ?? null;
+            try {
+              const firstLine = readFileSync(files[0]!.path, 'utf8').split('\n')[0];
+              if (firstLine) {
+                const meta = JSON.parse(firstLine);
+                return meta.payload?.id ?? null;
+              }
+            } catch { /* ignore */ }
+          }
+        } catch { /* ignore */ }
+        return null;
+      }
+
+      case 'gemini': {
+        // Gemini maps CWD→slug in ~/.gemini/projects.json
+        // Sessions stored in ~/.gemini/tmp/{slug}/chats/session-*.json
+        // Each JSON has { sessionId: "uuid", ... }
+        const projectsFile = join(homedir(), '.gemini', 'projects.json');
+        const geminiDir = join(homedir(), '.gemini', 'tmp');
+        if (!existsSync(geminiDir)) return null;
+        try {
+          // Try to find the project slug for this CWD
+          let targetSlug: string | null = null;
+          if (existsSync(projectsFile)) {
+            const raw = JSON.parse(readFileSync(projectsFile, 'utf8'));
+            const mapping: Record<string, string> = raw.projects ?? raw;
+            targetSlug = mapping[paneCwd] ?? null;
+          }
+
+          // Search for sessions — prioritize matching slug, fall back to all dirs
+          const dirsToSearch = targetSlug
+            ? [join(geminiDir, targetSlug)]
+            : readdirSync(geminiDir).map(d => join(geminiDir, d));
+
+          for (const dir of dirsToSearch) {
+            const chatsDir = join(dir, 'chats');
+            if (!existsSync(chatsDir)) continue;
+            const sessions = readdirSync(chatsDir)
+              .filter(f => f.endsWith('.json'))
+              .map(f => ({ name: f, mtime: statSync(join(chatsDir, f)).mtimeMs, path: join(chatsDir, f) }))
+              .sort((a, b) => b.mtime - a.mtime);
+            if (sessions.length > 0) {
+              // Read the JSON to extract the real sessionId UUID
+              const data = JSON.parse(readFileSync(sessions[0]!.path, 'utf8'));
+              return data.sessionId ?? null;
+            }
           }
         } catch { /* ignore */ }
         return null;
       }
 
       case 'opencode': {
-        // OpenCode stores sessions — check filesystem or use session list
-        // Try to find via process
-        if (!cliPid) return null;
+        // OpenCode stores sessions in SQLite at ~/.local/share/opencode/opencode.db
+        const dbPaths = [
+          join(homedir(), '.local', 'share', 'opencode', 'opencode.db'),
+          join(homedir(), '.opencode', 'opencode.db'),
+        ];
+        for (const dbPath of dbPaths) {
+          if (!existsSync(dbPath)) continue;
+          try {
+            const result = execFileSync('sqlite3', [dbPath,
+              `SELECT id FROM session WHERE directory = '${paneCwd}' ORDER BY rowid DESC LIMIT 1;`
+            ], { encoding: 'utf8', timeout: 5000 }).trim();
+            if (result) return result;
+          } catch { /* ignore */ }
+        }
+        // Fallback: try opencode CLI session list
         try {
-          // Check if opencode has a sessions directory
-          const ocDir = join(homedir(), '.opencode', 'sessions');
-          if (existsSync(ocDir)) {
-            const files = readdirSync(ocDir)
-              .map(f => ({ name: f, mtime: statSync(join(ocDir, f)).mtimeMs }))
-              .sort((a, b) => b.mtime - a.mtime);
-            if (files.length > 0) return files[0]!.name.replace(/\.[^.]+$/, '');
-          }
+          const result = execFileSync('sqlite3', [dbPaths[0]!,
+            `SELECT id FROM session ORDER BY rowid DESC LIMIT 1;`
+          ], { encoding: 'utf8', timeout: 5000 }).trim();
+          if (result) return result;
         } catch { /* ignore */ }
         return null;
       }
@@ -335,32 +406,56 @@ function getSessionId(paneId: number, cli: string): string | null {
 
 /**
  * Build the resume command for a CLI with a specific session ID.
+ * Pass cwd to ensure the directory is pre-trusted before launching.
  */
-function buildResumeCommand(cli: string, sessionId: string | null): ResolvedCommand {
+function buildResumeCommand(cli: string, sessionId: string | null, cwd?: string): ResolvedCommand {
   const def = CLI_DEFS[cli];
   if (!def) {
     const shell = IS_WIN ? 'cmd.exe' : 'bash';
     return { parts: [shell], shellCommand: shell, needsShell: false };
   }
+  // Pre-trust the directory so the CLI doesn't prompt on resume
+  if (cwd) ensureCliTrust(cli, cwd);
 
   // Validate session exists on disk before trying to resume it
   let validSessionId = sessionId;
-  if (validSessionId && cli === 'claude') {
-    // Claude needs a .jsonl file in the project directory
-    // Find all project dirs and check if the session exists in any of them
-    const projectsDir = join(homedir(), '.claude', 'projects');
-    let found = false;
-    try {
-      for (const projDir of readdirSync(projectsDir)) {
-        const jsonl = join(projectsDir, projDir, `${validSessionId}.jsonl`);
-        if (existsSync(jsonl)) {
-          found = true;
-          break;
-        }
+  if (validSessionId) {
+    switch (cli) {
+      case 'claude': {
+        // Claude needs a .jsonl file in the project directory
+        const projectsDir = join(homedir(), '.claude', 'projects');
+        let found = false;
+        try {
+          for (const projDir of readdirSync(projectsDir)) {
+            const jsonl = join(projectsDir, projDir, `${validSessionId}.jsonl`);
+            if (existsSync(jsonl)) {
+              found = true;
+              break;
+            }
+          }
+        } catch { /* ignore */ }
+        if (!found) validSessionId = null;
+        break;
       }
-    } catch { /* ignore */ }
-    if (!found) {
-      validSessionId = null; // Fall back to --continue
+      case 'codex': {
+        // Codex session ID is the rollout UUID — verify the rollout file exists
+        const codexDir = join(homedir(), '.codex', 'sessions');
+        let found = false;
+        try {
+          const walk = (dir: string): boolean => {
+            for (const entry of readdirSync(dir)) {
+              const full = join(dir, entry);
+              if (statSync(full).isDirectory()) { if (walk(full)) return true; }
+              else if (entry.includes(validSessionId!)) return true;
+            }
+            return false;
+          };
+          found = existsSync(codexDir) && walk(codexDir);
+        } catch { /* ignore */ }
+        if (!found) validSessionId = null;
+        break;
+      }
+      // Gemini and OpenCode: trust the session ID (validated at detection time)
     }
   }
 
@@ -375,8 +470,8 @@ function buildResumeCommand(cli: string, sessionId: string | null): ResolvedComm
         base.shellCommand += ' --continue';
         break;
       case 'gemini':
-        base.parts.push('--resume');
-        base.shellCommand += ' --resume';
+        base.parts.push('--resume', 'latest');
+        base.shellCommand += ' --resume latest';
         break;
       case 'codex':
         // codex resume is a subcommand, need to restructure
@@ -413,8 +508,10 @@ function buildResumeCommand(cli: string, sessionId: string | null): ResolvedComm
       base.shellCommand += ` --resume ${validSessionId}`;
       break;
     case 'gemini':
-      base.parts.push('--resume', validSessionId);
-      base.shellCommand += ` --resume ${validSessionId}`;
+      // Gemini --resume only accepts "latest" or an index number, not UUIDs.
+      // We store the UUID for reconcile/verification but always resume latest.
+      base.parts.push('--resume', 'latest');
+      base.shellCommand += ' --resume latest';
       break;
     case 'codex':
       return {
@@ -472,6 +569,50 @@ function ensureCliConfig(cli: string): void {
   } catch { /* ignore — best effort */ }
 }
 
+/**
+ * Pre-trust a working directory so the CLI doesn't prompt on launch.
+ * Each CLI stores trust config differently:
+ * - Gemini: ~/.gemini/trustedFolders.json  { "/path": "TRUST_FOLDER" }
+ * - Codex:  ~/.codex/config.toml           [projects."/path"] trust_level = "trusted"
+ */
+function ensureCliTrust(cli: string, cwd: string): void {
+  const def = CLI_DEFS[cli];
+  if (!def?.trustSetup || !cwd) return;
+
+  try {
+    switch (def.trustSetup) {
+      case 'gemini': {
+        const trustFile = join(homedir(), '.gemini', 'trustedFolders.json');
+        let existing: Record<string, string> = {};
+        try {
+          existing = JSON.parse(readFileSync(trustFile, 'utf8'));
+        } catch { /* file doesn't exist yet */ }
+        if (!existing[cwd]) {
+          existing[cwd] = 'TRUST_FOLDER';
+          mkdirSync(dirname(trustFile), { recursive: true });
+          writeFileSync(trustFile, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+        }
+        break;
+      }
+      case 'codex': {
+        const configFile = join(homedir(), '.codex', 'config.toml');
+        let content = '';
+        try {
+          content = readFileSync(configFile, 'utf8');
+        } catch { /* file doesn't exist yet */ }
+        // Check if this project is already trusted
+        const sectionHeader = `[projects."${cwd}"]`;
+        if (!content.includes(sectionHeader)) {
+          mkdirSync(dirname(configFile), { recursive: true });
+          const entry = `\n${sectionHeader}\ntrust_level = "trusted"\n`;
+          writeFileSync(configFile, content + entry, 'utf8');
+        }
+        break;
+      }
+    }
+  } catch { /* ignore — best effort */ }
+}
+
 type ResolvedCommand = {
   /** Full command parts to pass to wezterm spawn */
   parts: string[];
@@ -481,13 +622,14 @@ type ResolvedCommand = {
   needsShell: boolean;
 };
 
-function resolveCliCommand(cli: string, skipPermissions: boolean): ResolvedCommand {
+function resolveCliCommand(cli: string, skipPermissions: boolean, cwd?: string): ResolvedCommand {
   const def = CLI_DEFS[cli];
   if (!def) {
     throw new Error(`Unknown CLI "${cli}". Supported: ${Object.keys(CLI_DEFS).join(', ')}`);
   }
   if (skipPermissions) {
     ensureCliConfig(cli);
+    if (cwd) ensureCliTrust(cli, cwd);
   }
 
   const parts = [def.bin];
@@ -743,7 +885,11 @@ function panesInTab(tabId: number): PaneInfo[] {
 }
 
 function sendTextAndSubmit(paneId: number, text: string): void {
-  wez('send-text', '--pane-id', String(paneId), '--no-paste', text);
+  // Send text via paste mode (fast, atomic) then Enter via --no-paste.
+  // TUI apps (codex, gemini, opencode) use alternate screen buffers where
+  // --no-paste types char-by-char; paste mode delivers the text as a block
+  // so the TUI processes it fully before the Enter arrives.
+  wez('send-text', '--pane-id', String(paneId), text);
   wez('send-text', '--pane-id', String(paneId), '--no-paste', '\x0d');
 }
 
@@ -766,18 +912,21 @@ function detectPaneState(pane: PaneInfo): {
   else if (title.includes('opencode')) cli = 'opencode';
   else if (title.includes('goose')) cli = 'goose';
 
-  // Read last few lines of output
+  // Read pane output
   let lastOutput = '';
+  let fullOutput = '';
   try {
     const raw = wez('get-text', '--pane-id', String(pane.pane_id));
+    fullOutput = raw;
     const lines = raw.split('\n').filter(l => l.trim().length > 0);
     lastOutput = lines.slice(-5).join('\n');
   } catch { /* ignore */ }
 
-  // Fallback: detect CLI from pane output when title doesn't match
-  // (e.g. codex shows title "node" since it's a Node.js app)
+  // Fallback: detect CLI from full pane output when title doesn't match
+  // (e.g. codex shows title "node" since it's a Node.js app,
+  //  gemini shows "Ready (Project)" — banners may scroll off last 5 lines)
   if (!cli) {
-    const allOutput = lastOutput.toLowerCase();
+    const allOutput = fullOutput.toLowerCase();
     if (allOutput.includes('openai codex') || allOutput.includes('>_ codex')) cli = 'codex';
     else if (allOutput.includes('claude code')) cli = 'claude';
     else if (allOutput.includes('gemini cli')) cli = 'gemini';
@@ -1352,7 +1501,7 @@ server.tool(
     const dir = resolveCwd(cwd);
     if (dir) args.push('--cwd', dir);
     if (cli) {
-      const resolved = resolveCliCommand(cli, true);
+      const resolved = resolveCliCommand(cli, true, dir);
       args.push('--', ...resolved.parts);
     } else if (command) {
       args.push('--', ...command.split(' '));
@@ -1384,7 +1533,7 @@ server.tool(
     const dir = resolveCwd(cwd);
     if (dir) args.push('--cwd', dir);
     if (cli) {
-      const resolved = resolveCliCommand(cli, true);
+      const resolved = resolveCliCommand(cli, true, dir);
       args.push('--', ...resolved.parts);
     } else if (command) {
       args.push('--', ...command.split(' '));
@@ -1720,7 +1869,7 @@ server.tool(
       });
     }
 
-    const cmd = resolveCliCommand(cli, true);
+    const cmd = resolveCliCommand(cli, true, dir);
 
     const grid = calculateGrid(count);
     const allPaneIds: number[] = [];
@@ -1883,7 +2032,7 @@ server.tool(
     }
 
     const dir = resolveCwd(cwd);
-    const firstCmd = resolveCliCommand(agents[0]!.cli, true);
+    const firstCmd = resolveCliCommand(agents[0]!.cli, true, dir);
     const spawnArgs: string[] = [];
     if (dir) spawnArgs.push('--cwd', dir);
     spawnArgs.push('--', ...firstCmd.parts);
@@ -1897,7 +2046,7 @@ server.tool(
     let lastPane = firstPaneId;
 
     for (let i = 1; i < agents.length; i++) {
-      const cmd = resolveCliCommand(agents[i]!.cli, true);
+      const cmd = resolveCliCommand(agents[i]!.cli, true, dir);
       const splitDir = i % 2 === 1 ? '--right' : '--bottom';
       const splitFrom = i % 2 === 1 ? lastPane : paneIds[Math.max(0, i - 2)]!;
       const splitArgs = [splitDir, '--pane-id', String(splitFrom)];
@@ -2150,7 +2299,7 @@ server.tool(
 
     // Find a surviving pane in the same tab to split from
     const siblings = listPanes().filter(p => p.tab_id === tabId);
-    const cmd = resume ? buildResumeCommand(detectedCli, sessionId) : resolveCliCommand(detectedCli, true);
+    const cmd = resume ? buildResumeCommand(detectedCli, sessionId, cwd) : resolveCliCommand(detectedCli, true, cwd);
 
     let newPaneId: number;
     if (siblings.length > 0) {
@@ -2423,10 +2572,10 @@ server.tool(
         const tabPanes: RecoveredPane[] = [];
 
         const firstPane = tab.panes[0]!;
-        const firstCmd = buildResumeCommand(firstPane.cli, firstPane.session_id);
         // Resolve cwd — fall back to manifest project_root if empty/invalid
         const paneCwd = (firstPane.cwd || '').replace(/\/$/, '');
         const resolvedCwd = paneCwd && paneCwd.length > 1 ? paneCwd : manifest.project_root;
+        const firstCmd = buildResumeCommand(firstPane.cli, firstPane.session_id, resolvedCwd);
 
         const spawnArgs: string[] = [];
 
@@ -2451,12 +2600,12 @@ server.tool(
         let lastRight = firstPaneId;
         for (let i = 1; i < tab.panes.length; i++) {
           const pane = tab.panes[i]!;
-          const cmd = buildResumeCommand(pane.cli, pane.session_id);
           const dir = i % 2 === 1 ? '--right' : '--bottom';
           const splitFrom = i % 2 === 1 ? lastRight : firstPaneId;
           const splitArgs = [dir, '--pane-id', String(splitFrom)];
           const splitCwd = (pane.cwd || '').replace(/\/$/, '');
           const resolvedSplitCwd = splitCwd && splitCwd.length > 1 ? splitCwd : manifest.project_root;
+          const cmd = buildResumeCommand(pane.cli, pane.session_id, resolvedSplitCwd);
           splitArgs.push('--cwd', resolvedSplitCwd);
           splitArgs.push('--', ...cmd.parts);
           const newPaneId = Number(wez('split-pane', ...splitArgs));
