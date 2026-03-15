@@ -522,13 +522,29 @@ function isWezRunning(): boolean {
 /**
  * Start wezterm GUI if not running. Returns true if it was started.
  */
+function isGuiRunning(): boolean {
+  try {
+    const out = execSync('pgrep -x wezterm-gui', { encoding: 'utf8', timeout: 3000 });
+    return out.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function ensureWezRunning(): { running: boolean; started: boolean } {
-  if (isWezRunning()) {
+  // Both mux and GUI must be running — a headless mux-server alone is not enough
+  if (isWezRunning() && isGuiRunning()) {
     return { running: true, started: false };
   }
 
   if (!isWezInstalled()) {
     return { running: false, started: false };
+  }
+
+  // Kill orphaned mux-server with no GUI attached
+  if (isWezRunning() && !isGuiRunning()) {
+    try { execSync('pkill -x wezterm-mux-se', { timeout: 3000, shell: '/bin/bash' }); } catch { /* ignore */ }
+    execSync('sleep 0.5', { timeout: 2000, shell: '/bin/bash' });
   }
 
   try {
@@ -538,10 +554,10 @@ function ensureWezRunning(): { running: boolean; started: boolean } {
       timeout: 5000,
       shell: '/bin/bash',
     });
-    // Wait for mux server to come up
+    // Wait for GUI + mux to come up
     for (let i = 0; i < 10; i++) {
       execSync('sleep 0.5', { timeout: 2000, shell: '/bin/bash' });
-      if (isWezRunning()) {
+      if (isWezRunning() && isGuiRunning()) {
         return { running: true, started: true };
       }
     }
@@ -646,14 +662,28 @@ function detectPaneState(pane: PaneInfo): {
     lastOutput = lines.slice(-5).join('\n');
   } catch { /* ignore */ }
 
+  // Fallback: detect CLI from pane output when title doesn't match
+  // (e.g. codex shows title "node" since it's a Node.js app)
+  if (!cli) {
+    const allOutput = lastOutput.toLowerCase();
+    if (allOutput.includes('openai codex') || allOutput.includes('>_ codex')) cli = 'codex';
+    else if (allOutput.includes('claude code')) cli = 'claude';
+    else if (allOutput.includes('gemini cli')) cli = 'gemini';
+    else if (allOutput.includes('opencode')) cli = 'opencode';
+    else if (allOutput.includes('goose')) cli = 'goose';
+  }
+
   // Detect state
   let state: 'idle' | 'cli-ready' | 'cli-working' | 'exited' = 'idle';
-  if (lastOutput.includes('completed') || lastOutput.includes('Process')) {
+  if (lastOutput.includes('exit_behavior="Hold"') ||
+      /Process ".*" .* completed/.test(lastOutput)) {
     state = 'exited';
   } else if (cli) {
     // CLI is running — check if it's waiting for input or working
     if (lastOutput.includes('❯') && lastOutput.match(/❯\s*$/m)) {
       state = 'cli-ready'; // waiting for prompt
+    } else if (cli === 'codex' && lastOutput.match(/›\s*$/m)) {
+      state = 'cli-ready'; // codex uses › prompt
     } else {
       state = 'cli-working';
     }
@@ -1174,20 +1204,27 @@ server.tool(
   'wez_spawn',
   'Spawn a new tab or pane with an optional command. Returns the new pane ID.',
   {
-    command: z.string().optional().describe('Command to run (e.g. "claude --dangerously-skip-permissions"). Defaults to shell.'),
+    cli: z.enum(['claude', 'gemini', 'codex', 'opencode', 'goose']).optional()
+      .describe('Launch a known CLI with correct flags. Mutually exclusive with command.'),
+    command: z.string().optional().describe('Raw command to run. Ignored if cli is set. Defaults to shell.'),
     cwd: z.string().optional().describe('Working directory'),
     tab_title: z.string().optional().describe('Title for the new tab'),
   },
-  async ({ command, cwd, tab_title }) => {
+  async ({ cli, command, cwd, tab_title }) => {
     const args: string[] = [];
     const dir = resolveCwd(cwd);
     if (dir) args.push('--cwd', dir);
-    if (command) args.push('--', ...command.split(' '));
+    if (cli) {
+      const resolved = resolveCliCommand(cli, true);
+      args.push('--', ...resolved.parts);
+    } else if (command) {
+      args.push('--', ...command.split(' '));
+    }
     const paneId = wez('spawn', ...args);
     if (tab_title) {
       wez('set-tab-title', '--pane-id', paneId, tab_title);
     }
-    return ok({ pane_id: Number(paneId), tab_title });
+    return ok({ pane_id: Number(paneId), tab_title, cli: cli ?? null });
   },
 );
 
@@ -1197,19 +1234,26 @@ server.tool(
   {
     pane_id: z.number().describe('Pane to split'),
     direction: z.enum(['right', 'bottom']).describe('Split direction'),
-    command: z.string().optional().describe('Command to run in the new pane'),
+    cli: z.enum(['claude', 'gemini', 'codex', 'opencode', 'goose']).optional()
+      .describe('Launch a known CLI with correct flags. Mutually exclusive with command.'),
+    command: z.string().optional().describe('Raw command to run. Ignored if cli is set.'),
     cwd: z.string().optional().describe('Working directory'),
   },
-  async ({ pane_id, direction, command, cwd }) => {
+  async ({ pane_id, direction, cli, command, cwd }) => {
     const args: string[] = [
       direction === 'right' ? '--right' : '--bottom',
       '--pane-id', String(pane_id),
     ];
     const dir = resolveCwd(cwd);
     if (dir) args.push('--cwd', dir);
-    if (command) args.push('--', ...command.split(' '));
+    if (cli) {
+      const resolved = resolveCliCommand(cli, true);
+      args.push('--', ...resolved.parts);
+    } else if (command) {
+      args.push('--', ...command.split(' '));
+    }
     const newPaneId = wez('split-pane', ...args);
-    return ok({ pane_id: Number(newPaneId) });
+    return ok({ pane_id: Number(newPaneId), cli: cli ?? null });
   },
 );
 
