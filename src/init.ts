@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -70,7 +71,15 @@ function projectEntry(projectRoot: string): Record<string, unknown> {
 // Global config paths (per platform)
 // ---------------------------------------------------------------------------
 
+/** Resolve real user's home directory, even when running under sudo */
 function home(): string {
+  const sudoUser = process.env['SUDO_USER'];
+  if (sudoUser && process.getuid?.() === 0) {
+    try {
+      // Linux/macOS: resolve real user's home from passwd
+      return execSync(`eval echo ~${sudoUser}`, { encoding: 'utf8', timeout: 3000 }).trim();
+    } catch { /* fall through */ }
+  }
   return homedir();
 }
 

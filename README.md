@@ -52,15 +52,15 @@ Turns [Wezterm](https://wezfurlong.org/wezterm/) into a remote-controllable term
 - [Node.js](https://nodejs.org/) (v22.5+)
 - [Wezterm](https://wezfurlong.org/wezterm/installation)
 
-### Install and configure
+### Install
 
 One command:
 
 ```bash
-npx wezterm-agent-mcp init
+npm install -g wezterm-agent-mcp
 ```
 
-This checks that Wezterm is installed, then registers the MCP server globally for all AI coding tools:
+Install automatically registers the MCP server globally for all AI coding tools:
 
 | Config file | For |
 |---|---|
@@ -70,13 +70,14 @@ This checks that Wezterm is installed, then registers the MCP server globally fo
 | `~/.gemini/settings.json` | Gemini CLI |
 | `~/.config/opencode/...` | OpenCode (platform-specific path) |
 
-One run, every project, every tool. Existing config files are merged — other MCP servers won't be touched. Re-running is safe (idempotent).
+One install, every project, every tool. Existing config files are merged — other MCP servers won't be touched.
 
-For per-project setup instead (writes config into the project directory):
+To re-run manually or for per-project setup:
 
 ```bash
-npx wezterm-agent-mcp init --project
-npx wezterm-agent-mcp init --root /path/to/project
+wezterm-agent-mcp init              # re-run global setup
+wezterm-agent-mcp init --project    # per-project setup (current dir)
+wezterm-agent-mcp init --root /path  # per-project setup (specific dir)
 ```
 
 ### Wezterm Lua config (optional)

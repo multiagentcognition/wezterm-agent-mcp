@@ -1,6 +1,6 @@
 {
   "name": "wezterm-agent-mcp",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "description": "Wezterm MCP Server — programmable terminal control plane for multi-agent AI workflows",
   "license": "PolyForm-Strict-1.0.0",
@@ -33,6 +33,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "postinstall": "node build/cli.js init || true",
     "server": "node build/cli.js"
   },
   "dependencies": {
