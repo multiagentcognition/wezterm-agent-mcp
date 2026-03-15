@@ -51,6 +51,8 @@ export interface Platform {
   envShellCommand(envParts: string[], cmd: string): string;
   /** Character to send as Enter keypress. CR on Unix (PTY translates to LF), LF on Windows (ConPTY has no icrnl). */
   readonly enterKey: string;
+  /** Delay (ms) between pasting text and sending Enter. Windows ConPTY needs more time to flush paste buffers. */
+  readonly pasteSettleMs: number;
   /** Cross-platform synchronous sleep. */
   sleep(seconds: number): void;
 
@@ -97,6 +99,7 @@ const unix: Omit<Platform, 'name' | 'socketDir' | 'weztermGuiBin' | 'screenshotC
   shell: '/bin/bash',
   defaultShell: 'bash',
   enterKey: '\x0d',  // CR — PTY icrnl translates to LF
+  pasteSettleMs: 150,
 
   weztermBin(): string {
     return 'wezterm';
@@ -274,6 +277,7 @@ const windows: Platform = {
   shell: true as const,
   defaultShell: 'cmd.exe',
   enterKey: '\n',    // LF — ConPTY has no icrnl, TUIs expect LF
+  pasteSettleMs: 500, // ConPTY needs longer to flush paste buffers to TUIs
 
   weztermBin(): string {
     const candidate = join(winWeztermDir(), 'wezterm.exe');

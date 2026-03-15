@@ -899,7 +899,7 @@ function sendTextAndSubmit(paneId: number, text: string): void {
   // On Linux, PTY icrnl translates CR→LF so \x0d works. On Windows ConPTY
   // there's no such translation — TUIs expect \n (LF), not \x0d (CR).
   wez('send-text', '--pane-id', String(paneId), text);
-  sleepMs(150);
+  sleepMs(OS.pasteSettleMs);
   wez('send-text', '--pane-id', String(paneId), '--no-paste', OS.enterKey);
 }
 
