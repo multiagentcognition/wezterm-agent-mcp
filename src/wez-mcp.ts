@@ -1015,16 +1015,26 @@ server.tool(
     const file = filename ?? `wez-screenshot-${ts}.png`;
     const filePath = join(dir, file);
 
-    const tools = [
-      `import -window "$(xdotool getactivewindow 2>/dev/null || xprop -root _NET_ACTIVE_WINDOW | awk '{print $5}')" "${filePath}"`,
-      `scrot -u "${filePath}"`,
-      `grim -g "$(slurp)" "${filePath}"`,
-      `gnome-screenshot -w -f "${filePath}"`,
-    ];
+    let tools: string[];
+    const shell: string | true = IS_WIN ? true as const : '/bin/bash';
+    if (IS_WIN) {
+      tools = [
+        `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $bmp = New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen(0,0,0,0,$bmp.Size); $bmp.Save('${filePath.replace(/'/g, "''")}'); $g.Dispose(); $bmp.Dispose()"`,
+      ];
+    } else if (IS_MAC) {
+      tools = [`screencapture -w "${filePath}"`];
+    } else {
+      tools = [
+        `import -window "$(xdotool getactivewindow 2>/dev/null || xprop -root _NET_ACTIVE_WINDOW | awk '{print $5}')" "${filePath}"`,
+        `scrot -u "${filePath}"`,
+        `grim -g "$(slurp)" "${filePath}"`,
+        `gnome-screenshot -w -f "${filePath}"`,
+      ];
+    }
 
     for (const cmd of tools) {
       try {
-        execSync(cmd, { timeout: 10_000, shell: '/bin/bash', stdio: 'pipe' });
+        execSync(cmd, { timeout: 10_000, shell: shell as string, stdio: 'pipe' });
         if (existsSync(filePath)) {
           return ok({ screenshot: filePath, tool: cmd.split(' ')[0] });
         }
@@ -1032,7 +1042,11 @@ server.tool(
     }
 
     return ok({
-      error: 'No screenshot tool available. Install one of: imagemagick (import), scrot, grim, gnome-screenshot',
+      error: IS_WIN
+        ? 'Screenshot capture failed on Windows.'
+        : IS_MAC
+          ? 'Screenshot capture failed. Ensure screencapture is available.'
+          : 'No screenshot tool available. Install one of: imagemagick (import), scrot, grim, gnome-screenshot',
     });
   },
 );
@@ -1057,20 +1071,30 @@ server.tool(
         wez('activate-tab', ...args);
       } catch { continue; }
 
-      execSync('sleep 0.3', { timeout: 2000, shell: '/bin/bash' });
+      sleepMs(300);
 
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       const file = `wez-tab-${i + 1}-${ts}.png`;
       const filePath = join(dir, file);
 
-      const tools = [
-        `import -window "$(xdotool getactivewindow 2>/dev/null || xprop -root _NET_ACTIVE_WINDOW | awk '{print $5}')" "${filePath}"`,
-        `scrot -u "${filePath}"`,
-      ];
+      let tools: string[];
+      const tabShell: string | true = IS_WIN ? true as const : '/bin/bash';
+      if (IS_WIN) {
+        tools = [
+          `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $bmp = New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen(0,0,0,0,$bmp.Size); $bmp.Save('${filePath.replace(/'/g, "''")}'); $g.Dispose(); $bmp.Dispose()"`,
+        ];
+      } else if (IS_MAC) {
+        tools = [`screencapture -w "${filePath}"`];
+      } else {
+        tools = [
+          `import -window "$(xdotool getactivewindow 2>/dev/null || xprop -root _NET_ACTIVE_WINDOW | awk '{print $5}')" "${filePath}"`,
+          `scrot -u "${filePath}"`,
+        ];
+      }
 
       for (const cmd of tools) {
         try {
-          execSync(cmd, { timeout: 10_000, shell: '/bin/bash', stdio: 'pipe' });
+          execSync(cmd, { timeout: 10_000, shell: tabShell as string, stdio: 'pipe' });
           if (existsSync(filePath)) {
             screenshots.push({ tab_id: tabIds[i]!, path: filePath });
             break;
@@ -1909,10 +1933,17 @@ server.tool(
   {},
   async () => {
     try {
-      execSync('xdotool key F11', { timeout: 5000 });
+      if (IS_WIN) {
+        execSync('powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(\'{F11}\')"', { timeout: 5000, stdio: 'pipe' });
+      } else if (IS_MAC) {
+        execSync('osascript -e \'tell application "System Events" to keystroke "f" using {control down, command down}\'', { timeout: 5000 });
+      } else {
+        execSync('xdotool key F11', { timeout: 5000 });
+      }
       return ok({ toggled: true });
     } catch {
-      return ok({ toggled: false, note: 'xdotool not available. Press F11 manually.' });
+      const hint = IS_WIN ? 'SendKeys failed.' : IS_MAC ? 'AppleScript failed.' : 'xdotool not available.';
+      return ok({ toggled: false, note: `${hint} Press F11 manually.` });
     }
   },
 );
