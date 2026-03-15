@@ -2085,6 +2085,36 @@ server.tool(
 );
 
 server.tool(
+  'wez_kill_gui',
+  'Force-kill the WezTerm GUI process. Does not touch mux-server or sockets.',
+  {},
+  async () => {
+    const killed = killGuiProcess();
+    return ok({ killed, note: killed ? 'GUI process killed.' : 'No GUI process found.' });
+  },
+);
+
+server.tool(
+  'wez_kill_mux',
+  'Force-kill the WezTerm mux-server process. Does not touch GUI or sockets.',
+  {},
+  async () => {
+    const killed = killMuxProcess();
+    return ok({ killed, note: killed ? 'Mux-server process killed.' : 'No mux-server process found.' });
+  },
+);
+
+server.tool(
+  'wez_clean_sockets',
+  'Remove stale WezTerm socket files. Use after crashes or orphaned processes.',
+  {},
+  async () => {
+    const cleaned = cleanSockets();
+    return ok({ sockets_cleaned: cleaned });
+  },
+);
+
+server.tool(
   'wez_restart_pane',
   'Kill a pane and relaunch the same CLI in the same position. Useful for recovering a stuck agent.',
   {
