@@ -58,7 +58,7 @@ type CliDef = {
     settings: Record<string, unknown>;
   };
   /** Pre-trust working directory so the CLI doesn't prompt on launch */
-  trustSetup?: 'gemini' | 'codex';
+  trustSetup?: 'claude' | 'gemini' | 'codex';
   /** Human-readable name */
   label: string;
 };
@@ -67,6 +67,7 @@ const CLI_DEFS: Record<string, CliDef> = {
   claude: {
     bin: 'claude',
     skipPermFlags: ['--dangerously-skip-permissions'],
+    trustSetup: 'claude',
     label: 'Claude Code',
   },
   gemini: {
@@ -646,6 +647,7 @@ function ensureCliConfig(cli: string): void {
 /**
  * Pre-trust a working directory so the CLI doesn't prompt on launch.
  * Each CLI stores trust config differently:
+ * - Claude: ~/.claude/projects/{encoded-path}/  (directory existence = trusted)
  * - Gemini: ~/.gemini/trustedFolders.json  { "/path": "TRUST_FOLDER" }
  * - Codex:  ~/.codex/config.toml           [projects."/path"] trust_level = "trusted"
  */
@@ -655,6 +657,14 @@ function ensureCliTrust(cli: string, cwd: string): void {
 
   try {
     switch (def.trustSetup) {
+      case 'claude': {
+        // Claude Code trusts a directory once ~/.claude/projects/{encoded}/ exists.
+        // The encoded name replaces all '/' with '-' (e.g. /tmp/foo → -tmp-foo).
+        const encoded = cwd.replace(/\//g, '-');
+        const projectDir = join(homedir(), '.claude', 'projects', encoded);
+        mkdirSync(projectDir, { recursive: true });
+        break;
+      }
       case 'gemini': {
         const trustFile = join(homedir(), '.gemini', 'trustedFolders.json');
         let existing: Record<string, string> = {};
@@ -976,12 +986,50 @@ function panesInTab(tabId: number): PaneInfo[] {
   return listPanes().filter(p => p.tab_id === tabId);
 }
 
+/**
+ * Build spawn args that route to the correct project window.
+ * - If new_window is true, always creates a new window.
+ * - Otherwise, looks for an existing window with matching cwd and adds a tab there.
+ * - If no matching window exists, creates a new window automatically.
+ * Returns the args array to prepend to wez('spawn', ...args).
+ */
+function projectSpawnArgs(dir: string | undefined, newWindow?: boolean): string[] {
+  const args: string[] = [];
+  if (newWindow) {
+    args.push('--new-window');
+  } else {
+    const targetCwd = (dir ?? '').replace(/\/$/, '');
+    if (targetCwd) {
+      const allPanes = listPanes();
+      let existingPaneId: number | undefined;
+      for (const p of allPanes) {
+        if (normalizeCwd(p.cwd) === targetCwd) {
+          existingPaneId = p.pane_id;
+          break;
+        }
+      }
+      if (existingPaneId !== undefined) {
+        // Add tab to the existing project window
+        args.push('--pane-id', String(existingPaneId));
+      } else {
+        // No window for this project yet — create one
+        args.push('--new-window');
+      }
+    }
+  }
+  if (dir) args.push('--cwd', dir);
+  return args;
+}
+
 function sendTextAndSubmit(paneId: number, text: string): void {
   // Send text via paste mode (fast, atomic) then Enter via --no-paste.
   // TUI apps (codex, gemini, opencode) use alternate screen buffers where
   // --no-paste types char-by-char; paste mode delivers the text as a block
   // so the TUI processes it fully before the Enter arrives.
+  // A small delay is needed between paste and Enter — without it, TUIs like
+  // Claude Code and Gemini receive the Enter before the paste is processed.
   wez('send-text', '--pane-id', String(paneId), text);
+  sleepMs(150);
   wez('send-text', '--pane-id', String(paneId), '--no-paste', '\x0d');
 }
 
@@ -1580,20 +1628,18 @@ server.tool(
 
 server.tool(
   'wez_spawn',
-  'Spawn a new tab or pane with an optional command. Returns the new pane ID.',
+  'Spawn a new window, tab, or pane with an optional command. Use new_window=true to create a separate window. Returns the new pane ID.',
   {
     cli: z.enum(['claude', 'gemini', 'codex', 'opencode', 'goose']).optional()
       .describe('Launch a known CLI with correct flags. Mutually exclusive with command.'),
     command: z.string().optional().describe('Raw command to run. Ignored if cli is set. Defaults to shell.'),
     cwd: z.string().optional().describe('Working directory'),
+    new_window: z.boolean().optional().describe('Create a new window instead of a tab (default: false)'),
     tab_title: z.string().optional().describe('Title for the new tab'),
-    new_window: z.boolean().optional().describe('Create a new window instead of a new tab (default: false)'),
   },
-  async ({ cli, command, cwd, tab_title, new_window }) => {
-    const args: string[] = [];
-    if (new_window) args.push('--new-window');
+  async ({ cli, command, cwd, new_window, tab_title }) => {
     const dir = resolveCwd(cwd);
-    if (dir) args.push('--cwd', dir);
+    const args = projectSpawnArgs(dir, new_window);
     if (cli) {
       const resolved = resolveCliCommand(cli, true, dir);
       args.push('--', ...resolved.parts);
@@ -1841,9 +1887,10 @@ server.tool(
     cols: z.number().min(1).max(10).describe('Number of columns'),
     command: z.string().optional().describe('Command to run in each pane (e.g. "claude --dangerously-skip-permissions")'),
     cwd: z.string().optional().describe('Working directory'),
+    new_window: z.boolean().optional().describe('Create a new window instead of a tab (default: false)'),
     tab_title: z.string().optional().describe('Title for the tab'),
   },
-  async ({ rows, cols, command, cwd, tab_title }) => {
+  async ({ rows, cols, command, cwd, new_window, tab_title }) => {
     const wezState = ensureWezRunning();
     if (!wezState.running) {
       return ok({ error: 'Wezterm could not be started. Is it installed?' });
@@ -1851,11 +1898,10 @@ server.tool(
 
     const dir = resolveCwd(cwd);
     const cmdArgs = command ? command.split(' ') : [];
-    const spawnArgs: string[] = [];
-    if (dir) spawnArgs.push('--cwd', dir);
+    const spawnArgs = projectSpawnArgs(dir, new_window);
     if (cmdArgs.length) spawnArgs.push('--', ...cmdArgs);
 
-    // Spawn first pane as new tab
+    // Spawn first pane (in project window or new window)
     const firstPaneId = Number(wez('spawn', ...spawnArgs));
     if (tab_title) {
       wez('set-tab-title', '--pane-id', String(firstPaneId), tab_title);
@@ -1925,34 +1971,7 @@ server.tool(
 
     // count=0: just open a project window with a shell
     if (count === 0) {
-      const allPanes = listPanes();
-      const targetCwd = (dir ?? '').replace(/\/$/, '');
-      const forceNew = new_window === true;
-
-      // Check if a window already exists for this project
-      let existingWindowId: number | undefined;
-      if (!forceNew) {
-        for (const p of allPanes) {
-          const paneCwd = normalizeCwd(p.cwd);
-          if (paneCwd === targetCwd) {
-            existingWindowId = p.window_id;
-            break;
-          }
-        }
-      }
-
-      if (existingWindowId !== undefined) {
-        return ok({
-          project_name: projName,
-          project_root: dir ?? '(not set)',
-          window_exists: true,
-          window_id: existingWindowId,
-          note: `Window for "${projName}" already exists.`,
-        });
-      }
-
-      const spawnArgs: string[] = ['--new-window'];
-      if (dir) spawnArgs.push('--cwd', dir);
+      const spawnArgs = projectSpawnArgs(dir, new_window);
       const paneId = Number(wez('spawn', ...spawnArgs));
 
       return ok({
@@ -1969,21 +1988,8 @@ server.tool(
     const allPaneIds: number[] = [];
     const tabInfo: { tab_index: number; pane_ids: number[] }[] = [];
 
-    // Find existing windows for this project (match by cwd)
-    const allPanes = listPanes();
-    const preExistingPaneIds = new Set(allPanes.map(p => p.pane_id));
+    const preExistingPaneIds = new Set(listPanes().map(p => p.pane_id));
     const targetCwd = (dir ?? '').replace(/\/$/, '');
-    const projectWindowIds = new Set<number>();
-    for (const p of allPanes) {
-      const paneCwd = normalizeCwd(p.cwd);
-      if (paneCwd === targetCwd) {
-        projectWindowIds.add(p.window_id);
-      }
-    }
-
-    // Decide whether to create a new window
-    const forceNew = new_window === true;
-    const needsNewWindow = forceNew || projectWindowIds.size === 0;
 
     let remaining = count;
     let windowPaneId: number | null = null;
@@ -1995,11 +2001,11 @@ server.tool(
       const tabCols = Math.min(grid.cols, Math.ceil(Math.sqrt(agentsThisTab)));
       const tabRows = Math.ceil(agentsThisTab / tabCols);
 
-      const spawnArgs: string[] = [];
-      if (t === 0 && needsNewWindow) {
-        spawnArgs.push('--new-window');
-      }
-      if (dir) spawnArgs.push('--cwd', dir);
+      // First tab: use projectSpawnArgs to find/create the project window
+      // Subsequent tabs: anchor to the first pane in the window
+      const spawnArgs = t === 0
+        ? projectSpawnArgs(dir, new_window)
+        : (() => { const a: string[] = []; if (dir) a.push('--cwd', dir); return a; })();
       spawnArgs.push('--', ...cmd.parts);
 
       const firstPaneId = Number(wez('spawn', ...spawnArgs));
@@ -2108,16 +2114,17 @@ server.tool(
 
 server.tool(
   'wez_launch_mixed',
-  'Launch agents with different CLIs in one tab. Each agent can be a different CLI.',
+  'Launch agents with different CLIs in one tab. Each agent can be a different CLI. Use new_window=true to create a separate window.',
   {
     agents: z.array(z.object({
       cli: z.enum(['claude', 'gemini', 'codex', 'opencode', 'goose']).describe('CLI to use'),
       label: z.string().optional().describe('Optional label for this agent'),
     })).describe('List of agents to launch'),
     cwd: z.string().optional().describe('Working directory'),
+    new_window: z.boolean().optional().describe('Create a new window instead of a tab (default: false)'),
     tab_title: z.string().optional().describe('Title for the tab'),
   },
-  async ({ agents, cwd, tab_title }) => {
+  async ({ agents, cwd, new_window, tab_title }) => {
     if (agents.length === 0) throw new Error('Must specify at least one agent');
 
     const wezState = ensureWezRunning();
@@ -2127,8 +2134,7 @@ server.tool(
 
     const dir = resolveCwd(cwd);
     const firstCmd = resolveCliCommand(agents[0]!.cli, true, dir);
-    const spawnArgs: string[] = [];
-    if (dir) spawnArgs.push('--cwd', dir);
+    const spawnArgs = projectSpawnArgs(dir, new_window);
     spawnArgs.push('--', ...firstCmd.parts);
 
     const firstPaneId = Number(wez('spawn', ...spawnArgs));
