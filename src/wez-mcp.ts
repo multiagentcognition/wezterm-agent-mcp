@@ -602,10 +602,20 @@ function ensureCliTrust(cli: string, cwd: string): void {
   try {
     switch (def.trustSetup) {
       case 'claude': {
-        // Claude Code trusts a directory once ~/.claude/projects/{encoded}/ exists.
-        const encoded = OS.encodeTrustPath(cwd);
-        const projectDir = join(homedir(), '.claude', 'projects', encoded);
-        mkdirSync(projectDir, { recursive: true });
+        // Claude Code stores trust in ~/.claude.json under
+        // projects["/abs/path"].hasTrustDialogAccepted = true
+        const configFile = join(homedir(), '.claude.json');
+        let config: Record<string, any> = {};
+        try {
+          config = JSON.parse(readFileSync(configFile, 'utf8'));
+        } catch { /* file doesn't exist yet */ }
+        if (!config.projects) config.projects = {};
+        const proj = config.projects[cwd] ?? {};
+        if (!proj.hasTrustDialogAccepted) {
+          proj.hasTrustDialogAccepted = true;
+          config.projects[cwd] = proj;
+          writeFileSync(configFile, JSON.stringify(config, null, 2) + '\n', 'utf8');
+        }
         break;
       }
       case 'gemini': {
