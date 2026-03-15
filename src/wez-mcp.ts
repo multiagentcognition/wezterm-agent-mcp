@@ -245,9 +245,7 @@ function getSessionId(paneId: number, cli: string, allContexts: Map<number, Pane
             return data.sessionId ?? null;
           }
         }
-        // Fallback: find session file matching this pane's CWD.
-        // Only safe when a single instance runs.
-        if (multipleInstances) return null;
+        // Fallback: find session files matching this pane's CWD.
         const sessionsDir = join(homedir(), '.claude', 'sessions');
         if (!existsSync(sessionsDir)) return null;
         try {
@@ -262,11 +260,28 @@ function getSessionId(paneId: number, cli: string, allContexts: Map<number, Pane
             })
             .filter((f): f is NonNullable<typeof f> => f !== null)
             .sort((a, b) => b.mtime - a.mtime);
-          // Match by CWD first (normalize for backslash/forward-slash differences)
-          const cwdMatch = files.find(f => f.cwd && pathsEqual(f.cwd, paneCwd));
-          if (cwdMatch) return cwdMatch.sessionId ?? null;
-          // Global fallback (Windows or single-instance)
-          if (files.length > 0) return files[0]!.sessionId ?? null;
+          // Find all session files matching this CWD
+          const cwdMatches = files.filter(f => f.cwd && pathsEqual(f.cwd, paneCwd));
+          if (cwdMatches.length > 0) {
+            if (!multipleInstances) {
+              return cwdMatches[0]!.sessionId ?? null;
+            }
+            // Multiple instances in same CWD — assign by pane order.
+            // Sort pane IDs sharing this CLI+CWD, find our index, pick
+            // the corresponding session file. Even if mapping isn't exact,
+            // all sessions are from the same project.
+            const peerPaneIds = [...allContexts.entries()]
+              .filter(([, c]) => c.cli === cli && pathsEqual(c.cwd, paneCwd))
+              .map(([id]) => id)
+              .sort((a, b) => a - b);
+            const myIndex = peerPaneIds.indexOf(paneId);
+            if (myIndex >= 0 && myIndex < cwdMatches.length) {
+              return cwdMatches[myIndex]!.sessionId ?? null;
+            }
+            return cwdMatches[cwdMatches.length - 1]!.sessionId ?? null;
+          }
+          // No CWD match — global fallback (only safe for single instance)
+          if (!multipleInstances && files.length > 0) return files[0]!.sessionId ?? null;
         } catch { /* ignore */ }
         return null;
       }
@@ -895,17 +910,12 @@ function projectSpawnArgs(dir: string | undefined, newWindow?: boolean): string[
 }
 
 function sendTextAndSubmit(paneId: number, text: string): void {
-  // Send text via paste mode (fast, atomic) then Enter via --no-paste.
-  // TUI apps (codex, gemini, opencode) use alternate screen buffers where
-  // --no-paste types char-by-char; paste mode delivers the text as a block
-  // so the TUI processes it fully before the Enter arrives.
-  // A small delay is needed between paste and Enter — without it, TUIs like
-  // Claude Code and Gemini receive the Enter before the paste is processed.
-  // On Linux, PTY icrnl translates CR→LF so \x0d works. On Windows ConPTY
-  // there's no such translation — TUIs expect \n (LF), not \x0d (CR).
-  wez('send-text', '--pane-id', String(paneId), text);
-  sleepMs(OS.pasteSettleMs);
-  wez('send-text', '--pane-id', String(paneId), '--no-paste', OS.enterKey);
+  // Append newline to the text and paste it as a single atomic operation.
+  // TUI apps process the entire paste buffer at once, so the trailing \n
+  // is interpreted as Enter after the text — no timing issues.
+  // Previous approach (separate paste + delay + Enter) failed on Windows
+  // because ConPTY paste buffer flush timing is unpredictable.
+  wez('send-text', '--pane-id', String(paneId), text + '\n');
 }
 
 /**
