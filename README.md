@@ -1,4 +1,4 @@
-# wezterm-mcp
+# wezterm-agent-mcp
 
 Wezterm MCP Server — a programmable terminal control plane for multi-agent AI workflows.
 

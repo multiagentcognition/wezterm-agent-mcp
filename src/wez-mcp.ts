@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * Wezterm MCP Server
  *
@@ -1052,7 +1050,7 @@ function ok(data: Record<string, unknown> = {}): { content: { type: 'text'; text
 // MCP Server
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({ name: 'wezterm-mcp', version: '0.1.0' });
+const server = new McpServer({ name: 'wezterm-agent-mcp', version: '0.1.0' });
 
 // --- Wezterm lifecycle ------------------------------------------------------
 
@@ -2598,12 +2596,7 @@ server.tool(
 // Start
 // ---------------------------------------------------------------------------
 
-async function main() {
+export async function runServer(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
-
-main().catch(err => {
-  console.error('wezterm-mcp failed:', err);
-  process.exit(1);
-});

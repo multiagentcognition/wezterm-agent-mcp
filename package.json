@@ -21,9 +21,9 @@
     "opencode",
     "orchestration"
   ],
-  "main": "./build/wez-mcp.js",
+  "main": "./build/cli.js",
   "bin": {
-    "wezterm-mcp": "build/wez-mcp.js"
+    "wezterm-agent-mcp": "build/cli.js"
   },
   "files": [
     "build/",
