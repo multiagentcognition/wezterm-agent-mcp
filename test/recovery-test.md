@@ -228,9 +228,27 @@ Verify the recovery output reports:
 
 1. Run `wez_status` — save as **STATUS_B**
 2. Run `wez_list` — save as **LIST_B**
-3. Run `wez_read_all_deep`, asking each agent: "What is your recovery token?" — save as **DEEP_B**
+3. Verify all 14 CLI panes are alive (not exited). If any exited, record them and note the `wrapWithFreshFallback` launched a fresh session instead.
 
-Record the same fields as Snapshot A, including window and tab titles.
+### Token Verification
+
+For each of the 14 CLI panes, send via `wez_send_text_submit`:
+
+    What is your recovery token? Repeat it exactly.
+
+Then read each pane's output via `wez_get_text` to capture the response.
+
+**Important (Windows):** If `wez_send_text_submit` does not trigger submission
+(text sits in the input but the CLI does not process it), follow up with
+`wez_send_key` sending `enter` to each pane. This is a known Windows ConPTY
+timing issue where the paste buffer hasn't flushed before the Enter arrives.
+
+Record each agent's response. An agent that resumed with a specific session ID
+should return its original `RT:{PANE_ID}:{PROJECT}` token. An agent that started
+fresh (no session ID, or `wrapWithFreshFallback` triggered) will not know the
+token — mark it as `FRESH` rather than `FAIL`.
+
+Save all responses as **TOKENS_B**.
 
 ## Compare and Report
 
@@ -244,7 +262,7 @@ Compare Snapshot A vs Snapshot B field by field:
 | 4  | Per-pane project (cwd)    | Same project folder per logical pane position          |
 | 5  | Per-pane CLI type         | Same cli (claude/codex/gemini/opencode/null) per pane  |
 | 6  | Per-pane state            | All CLI panes `cli-ready`, all shells `idle`           |
-| 7  | Recovery tokens           | Every CLI agent returns its original `RT:{ID}:{PROJECT}` |
+| 7  | Recovery tokens           | CLI panes with session IDs return `RT:{ID}:{PROJECT}`; panes without session IDs return FRESH (expected) |
 | 8  | Window titles             | Same title per window (including N/M numbering)        |
 | 9  | Tab titles                | Same auto-generated title per tab (CLI mix matches)    |
 | 10 | Multi-tab preserved       | W3 still has exactly 2 tabs after recovery             |
@@ -266,6 +284,8 @@ Print a comparison table showing A vs B values for each of the 13 checks.
 End with a single verdict:
 
     PASS — All 13 checks matched. Session recovery is correct.
+    PASS (with FRESH) — All checks passed but some CLI panes started fresh
+         (no session ID due to same-CWD ambiguity). List which panes were FRESH.
     FAIL — List mismatched checks with A vs B values.
 
 ## Cleanup
