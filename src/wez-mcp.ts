@@ -224,11 +224,27 @@ function getSessionId(paneId: number, cli: string): string | null {
     switch (cli) {
       case 'claude': {
         // ~/.claude/sessions/{PID}.json contains { sessionId: "uuid" }
-        if (!cliPid) return null;
-        const sessionFile = join(homedir(), '.claude', 'sessions', `${cliPid}.json`);
-        if (!existsSync(sessionFile)) return null;
-        const data = JSON.parse(readFileSync(sessionFile, 'utf8'));
-        return data.sessionId ?? null;
+        if (cliPid) {
+          const sessionFile = join(homedir(), '.claude', 'sessions', `${cliPid}.json`);
+          if (existsSync(sessionFile)) {
+            const data = JSON.parse(readFileSync(sessionFile, 'utf8'));
+            return data.sessionId ?? null;
+          }
+        }
+        // Fallback: find the most recent session file (needed on Windows where PID lookup is unavailable)
+        const sessionsDir = join(homedir(), '.claude', 'sessions');
+        if (!existsSync(sessionsDir)) return null;
+        try {
+          const files = readdirSync(sessionsDir)
+            .filter(f => f.endsWith('.json'))
+            .map(f => ({ name: f, mtime: statSync(join(sessionsDir, f)).mtimeMs }))
+            .sort((a, b) => b.mtime - a.mtime);
+          if (files.length > 0) {
+            const data = JSON.parse(readFileSync(join(sessionsDir, files[0]!.name), 'utf8'));
+            return data.sessionId ?? null;
+          }
+        } catch { /* ignore */ }
+        return null;
       }
 
       case 'gemini': {
@@ -1157,7 +1173,7 @@ server.tool(
         title: p.title,
         cli: state.cli,
         state: state.state,
-        cwd: p.cwd.replace(/^file:\/\/[^/]*/, ''),
+        cwd: normalizeCwd(p.cwd),
         output,
       });
     }
@@ -1198,7 +1214,7 @@ server.tool(
           title: p.title,
           cli: state.cli,
           state: state.state,
-          cwd: p.cwd.replace(/^file:\/\/[^/]*/, ''),
+          cwd: normalizeCwd(p.cwd),
           summary: summary ?? '(agent did not respond within 30s)',
           queried: true,
         });
@@ -1220,7 +1236,7 @@ server.tool(
           title: p.title,
           cli: state.cli,
           state: state.state,
-          cwd: p.cwd.replace(/^file:\/\/[^/]*/, ''),
+          cwd: normalizeCwd(p.cwd),
           output,
           queried: false,
           skipped_reason: 'Agent is currently working. Not interrupted.',
@@ -1243,7 +1259,7 @@ server.tool(
           title: p.title,
           cli: state.cli,
           state: state.state,
-          cwd: p.cwd.replace(/^file:\/\/[^/]*/, ''),
+          cwd: normalizeCwd(p.cwd),
           output,
           queried: false,
           skipped_reason: state.cli ? 'Agent exited.' : 'No CLI detected — plain shell.',
@@ -1621,7 +1637,7 @@ server.tool(
       let existingWindowId: number | undefined;
       if (!forceNew) {
         for (const p of allPanes) {
-          const paneCwd = p.cwd.replace(/^file:\/\/[^/]*/, '').replace(/\/$/, '');
+          const paneCwd = normalizeCwd(p.cwd);
           if (paneCwd === targetCwd) {
             existingWindowId = p.window_id;
             break;
@@ -1663,7 +1679,7 @@ server.tool(
     const targetCwd = (dir ?? '').replace(/\/$/, '');
     const projectWindowIds = new Set<number>();
     for (const p of allPanes) {
-      const paneCwd = p.cwd.replace(/^file:\/\/[^/]*/, '').replace(/\/$/, '');
+      const paneCwd = normalizeCwd(p.cwd);
       if (paneCwd === targetCwd) {
         projectWindowIds.add(p.window_id);
       }
@@ -1738,7 +1754,7 @@ server.tool(
           // Find all windows for this project
           const projWindows = new Set<number>();
           for (const p of currentPanes) {
-            const cwd = p.cwd.replace(/^file:\/\/[^/]*/, '').replace(/\/$/, '');
+            const cwd = normalizeCwd(p.cwd);
             if (cwd === targetCwd) {
               projWindows.add(p.window_id);
             }
