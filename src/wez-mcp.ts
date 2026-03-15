@@ -9,7 +9,7 @@
  */
 
 import { execSync, execFileSync, spawn as nodeSpawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -133,6 +133,11 @@ const MANIFEST_PATH = join(MANIFEST_DIR, 'wez-session.json');
 
 function saveManifest(manifest: SessionManifest): void {
   mkdirSync(MANIFEST_DIR, { recursive: true });
+  // Back up existing manifest before overwriting
+  if (existsSync(MANIFEST_PATH)) {
+    const backupPath = join(MANIFEST_DIR, 'wez-session.backup.json');
+    try { renameSync(MANIFEST_PATH, backupPath); } catch { /* ignore */ }
+  }
   writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 }
 
