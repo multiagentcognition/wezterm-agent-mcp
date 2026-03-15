@@ -71,7 +71,7 @@ const CLI_DEFS: Record<string, CliDef> = {
   },
   codex: {
     bin: 'codex',
-    skipPermFlags: ['--approval-mode', 'full-auto'],
+    skipPermFlags: ['--full-auto'],
     label: 'Codex CLI',
   },
   opencode: {
