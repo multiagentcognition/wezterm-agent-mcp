@@ -929,7 +929,7 @@ function sendTextAndSubmit(paneId: number, text: string): void {
   // PTY read cycle after the TUI has processed the pasted text.
   wez('send-text', '--pane-id', String(paneId), text);
   wez('get-text', '--pane-id', String(paneId));
-  wez('send-text', '--pane-id', String(paneId), '--no-paste', '\x0d');
+  wez('send-text', '--pane-id', String(paneId), '--no-paste', OS.enterKey);
 }
 
 /**
@@ -2069,7 +2069,7 @@ server.tool(
       'ctrl+w': '\x17',
       'escape': '\x1b',
       'tab': '\x09',
-      'enter': '\x0d',
+      'enter': OS.enterKey,
       'up': '\x1b[A',
       'down': '\x1b[B',
       'right': '\x1b[C',
@@ -2094,7 +2094,7 @@ server.tool(
   async ({ tab_id, key }) => {
     const keyMap: Record<string, string> = {
       'ctrl+c': '\x03', 'ctrl+d': '\x04', 'ctrl+z': '\x1a',
-      'ctrl+l': '\x0c', 'escape': '\x1b', 'enter': '\x0d',
+      'ctrl+l': '\x0c', 'escape': '\x1b', 'enter': OS.enterKey,
     };
     const sequence = keyMap[key.toLowerCase()];
     if (!sequence) {
