@@ -825,9 +825,14 @@ function normalizeCwd(cwd: string): string {
   return OS.normalizeCwd(cwd);
 }
 
-/** Compare two paths ignoring slash direction and trailing slashes. */
+/** Compare two paths ignoring slash direction and trailing slashes.
+ *  Case-insensitive on Windows only — Linux/macOS filesystems are case-sensitive. */
 function pathsEqual(a: string, b: string): boolean {
-  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const norm = (p: string) => {
+    let n = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (OS.name === 'windows') n = n.toLowerCase();
+    return n;
+  };
   return norm(a) === norm(b);
 }
 
