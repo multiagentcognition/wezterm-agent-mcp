@@ -163,8 +163,8 @@ export function initGlobal(): InitResult {
   const entry = globalEntry();
   const updatedFiles: string[] = [];
 
-  // Claude Code / Codex — ~/.claude/settings.json
-  writeMcpServersFile(join(home(), '.claude', 'settings.json'), entry, updatedFiles);
+  // Claude Code — ~/.claude.json (NOT ~/.claude/settings.json)
+  writeMcpServersFile(join(home(), '.claude.json'), entry, updatedFiles);
 
   // Cursor — ~/.cursor/mcp.json
   writeMcpServersFile(join(home(), '.cursor', 'mcp.json'), entry, updatedFiles);

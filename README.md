@@ -64,7 +64,7 @@ This checks that Wezterm is installed, then registers the MCP server globally fo
 
 | Config file | For |
 |---|---|
-| `~/.claude/settings.json` | Claude Code, Codex |
+| `~/.claude.json` | Claude Code |
 | `~/.cursor/mcp.json` | Cursor |
 | VS Code user `mcp.json` | VS Code (platform-specific path) |
 | `~/.gemini/settings.json` | Gemini CLI |
