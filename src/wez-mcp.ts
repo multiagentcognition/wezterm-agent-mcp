@@ -807,7 +807,7 @@ function wez(...args: string[]): string {
     }
     return execFileSync(weztermBin(), ['cli', ...args], {
       encoding: 'utf8',
-      timeout: 10_000,
+      timeout: 30_000,
       env,
     }).trim();
   } catch (err: any) {
@@ -896,9 +896,11 @@ function sendTextAndSubmit(paneId: number, text: string): void {
   // so the TUI processes it fully before the Enter arrives.
   // A small delay is needed between paste and Enter — without it, TUIs like
   // Claude Code and Gemini receive the Enter before the paste is processed.
+  // On Linux, PTY icrnl translates CR→LF so \x0d works. On Windows ConPTY
+  // there's no such translation — TUIs expect \n (LF), not \x0d (CR).
   wez('send-text', '--pane-id', String(paneId), text);
   sleepMs(150);
-  wez('send-text', '--pane-id', String(paneId), '--no-paste', '\x0d');
+  wez('send-text', '--pane-id', String(paneId), '--no-paste', OS.enterKey);
 }
 
 /**
@@ -2512,8 +2514,10 @@ server.tool(
         tabPanes.push({ cli: firstPane.cli, session_id: firstPane.session_id, pane_id: firstPaneId });
 
         // Remaining panes — split from first
+        // Small delay between spawns prevents wezterm from being overwhelmed
         let lastRight = firstPaneId;
         for (let i = 1; i < tab.panes.length; i++) {
+          sleepMs(300);
           const pane = tab.panes[i]!;
           const dir = i % 2 === 1 ? '--right' : '--bottom';
           const splitFrom = i % 2 === 1 ? lastRight : firstPaneId;
