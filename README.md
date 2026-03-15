@@ -86,22 +86,33 @@ It provides:
 - **Tab titles** auto-derived from pane CLI contents (e.g., "Claude (3) + shell")
 - **F11** toggles fullscreen
 
-## Configuration
+## Setup
 
-Add to your MCP client config (e.g., `.mcp.json`, Claude Code settings, etc.):
+From your project directory:
 
-```json
-{
-  "mcpServers": {
-    "wezterm": {
-      "command": "wezterm-agent-mcp",
-      "env": {
-        "WEZ_PROJECT_ROOT": "/path/to/your/project"
-      }
-    }
-  }
-}
+```bash
+npx wezterm-agent-mcp init
 ```
+
+This auto-configures the MCP server for every supported AI coding CLI in one shot:
+
+| File | For |
+|---|---|
+| `.mcp.json` | Claude Code, Codex |
+| `.cursor/mcp.json` | Cursor |
+| `.vscode/mcp.json` | VS Code |
+| `.gemini/settings.json` | Gemini CLI |
+| `opencode.json` | OpenCode |
+
+Existing config files are merged — other MCP servers you've configured won't be touched.
+
+Use `--root` to target a different directory:
+
+```bash
+npx wezterm-agent-mcp init --root /path/to/project
+```
+
+Re-running is safe (idempotent) — it only writes if something changed.
 
 ### Environment Variables
 
