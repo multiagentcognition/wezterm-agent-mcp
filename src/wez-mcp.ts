@@ -2025,7 +2025,7 @@ server.tool(
 
 server.tool(
   'wez_kill_all',
-  'Kill ALL panes in ALL tabs. Shuts down every agent.',
+  'Kill ALL panes in ALL tabs. Shuts down every agent, GUI, and mux-server processes. Cleans up stale sockets.',
   {},
   async () => {
     let count = 0;
@@ -2036,7 +2036,37 @@ server.tool(
         try { wez('kill-pane', '--pane-id', String(p.pane_id)); } catch { /* ignore — last pane kill closes wezterm */ }
       }
     } catch { /* ignore — wezterm may close mid-loop */ }
-    return ok({ killed: count });
+
+    // Kill any remaining GUI and mux-server processes
+    try {
+      if (IS_WIN) {
+        try { execSync('taskkill /F /IM wezterm-gui.exe', { timeout: 5000, stdio: 'pipe' }); } catch { /* none running */ }
+        try { execSync('taskkill /F /IM wezterm-mux-server.exe', { timeout: 5000, stdio: 'pipe' }); } catch { /* none running */ }
+      } else {
+        try { execSync('pkill -x wezterm-gui', { timeout: 3000 }); } catch { /* none running */ }
+        try { execSync('pkill -x wezterm-mux-se', { timeout: 3000 }); } catch { /* none running */ }
+      }
+    } catch { /* ignore */ }
+
+    // Clean up stale socket files
+    try {
+      let socketDir: string;
+      if (IS_WIN) {
+        socketDir = join(homedir(), '.local', 'share', 'wezterm');
+      } else if (IS_MAC) {
+        socketDir = join(homedir(), '.local', 'share', 'wezterm');
+      } else {
+        socketDir = join('/run/user', String(process.getuid?.()), 'wezterm');
+      }
+      const { unlinkSync } = require('node:fs');
+      for (const entry of readdirSync(socketDir)) {
+        if (entry.startsWith('gui-sock-') || entry === 'sock') {
+          try { unlinkSync(join(socketDir, entry)); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
+
+    return ok({ killed: count, cleaned: true });
   },
 );
 
