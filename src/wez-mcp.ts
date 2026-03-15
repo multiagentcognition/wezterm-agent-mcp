@@ -71,7 +71,7 @@ const CLI_DEFS: Record<string, CliDef> = {
   },
   gemini: {
     bin: 'gemini',
-    skipPermFlags: ['--sandbox=none'],
+    skipPermFlags: ['--no-sandbox'],
     trustSetup: 'gemini',
     label: 'Gemini CLI',
   },
@@ -237,15 +237,29 @@ function getCliPid(ttyName: string, cli: string): string | null {
  */
 function getSessionId(paneId: number, cli: string): string | null {
   try {
-    const pane = listPanes().find(p => p.pane_id === paneId);
+    const allPanes = listPanes();
+    const pane = allPanes.find(p => p.pane_id === paneId);
     if (!pane) return null;
 
     const paneCwd = normalizeCwd(pane.cwd);
     const cliPid = getCliPid(pane.tty_name, cli);
 
+    // Count how many panes are running the same CLI type.
+    // If multiple panes share the same CLI, the filesystem-based fallback
+    // (most-recent session file) cannot distinguish between them and would
+    // return the SAME session ID for all, causing N-1 panes to crash on
+    // resume.  In that case return null so the caller uses "resume latest"
+    // mode (--continue / --resume without an ID) which is always safe.
+    const sameCli = allPanes.filter(p => {
+      const s = detectPaneState(p);
+      return s.cli === cli;
+    });
+    const multipleInstances = sameCli.length > 1;
+
     switch (cli) {
       case 'claude': {
-        // Primary: find session by PID → ~/.claude/sessions/{PID}.json
+        // ~/.claude/sessions/{PID}.json contains { sessionId: "uuid" }
+        // Per-PID lookup is precise — safe even with multiple instances.
         if (cliPid) {
           const sessionFile = join(homedir(), '.claude', 'sessions', `${cliPid}.json`);
           if (existsSync(sessionFile)) {
@@ -253,7 +267,9 @@ function getSessionId(paneId: number, cli: string): string | null {
             return data.sessionId ?? null;
           }
         }
-        // Fallback: find session file matching this pane's CWD
+        // Fallback: find session file matching this pane's CWD.
+        // Only safe when a single instance runs.
+        if (multipleInstances) return null;
         const sessionsDir = join(homedir(), '.claude', 'sessions');
         if (!existsSync(sessionsDir)) return null;
         try {
@@ -278,7 +294,9 @@ function getSessionId(paneId: number, cli: string): string | null {
       }
 
       case 'codex': {
-        // Walk ~/.codex/sessions/ for rollout files, match by CWD from session_meta
+        // Walk ~/.codex/sessions/ for rollout files, match by CWD from session_meta.
+        // Fallback (no CWD match) is not safe with multiple instances.
+        if (multipleInstances) return null;
         const codexDir = join(homedir(), '.codex', 'sessions');
         if (!existsSync(codexDir)) return null;
         try {
@@ -377,18 +395,21 @@ function getSessionId(paneId: number, cli: string): string | null {
             if (result) return result;
           } catch { /* ignore */ }
         }
-        // Fallback: try opencode CLI session list
+        // Fallback: try without CWD filter — only safe with one instance.
+        if (multipleInstances) return null;
         try {
           const result = execFileSync('sqlite3', [dbPaths[0]!,
             `SELECT id FROM session ORDER BY rowid DESC LIMIT 1;`
           ], { encoding: 'utf8', timeout: 5000 }).trim();
           if (result) return result;
         } catch { /* ignore */ }
+        // Fallback: null means buildResumeCommand will use --continue
         return null;
       }
 
       case 'goose': {
         // Goose uses SQLite — query for most recent session
+        if (multipleInstances) return null;
         try {
           const result = execFileSync('goose', ['session', 'list', '--format', 'json', '--limit', '1'], {
             encoding: 'utf8', timeout: 5000,
@@ -467,35 +488,66 @@ function buildResumeCommand(cli: string, sessionId: string | null, cwd?: string)
   // Start with skip-permissions command
   const base = resolveCliCommand(cli, true);
 
+  // Helper: append resume flags to a resolved command.
+  // When needsShell is true (cmd.exe /c "..." or bash -c "..."), flags must
+  // go INSIDE the shell command string (parts[2]), not as separate array elements.
+  const appendFlags = (target: ResolvedCommand, ...flags: string[]): void => {
+    const suffix = ' ' + flags.join(' ');
+    if (target.needsShell) {
+      target.parts[2] += suffix;
+    } else {
+      target.parts.push(...flags);
+    }
+    target.shellCommand += suffix;
+  };
+
   if (!validSessionId) {
     // No valid session ID — use "resume latest" mode
     switch (cli) {
       case 'claude':
-        base.parts.push('--continue');
-        base.shellCommand += ' --continue';
+        appendFlags(base, '--continue');
         break;
       case 'gemini':
-        base.parts.push('--resume', 'latest');
-        base.shellCommand += ' --resume latest';
+        // Gemini --resume only accepts "latest" or an index number, not UUIDs.
+        appendFlags(base, '--resume', 'latest');
         break;
       case 'codex':
         // codex resume is a subcommand, need to restructure
+        if (IS_WIN) {
+          const b64r1 = Buffer.from('codex').toString('base64');
+          const setVarR1 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64r1}\\x07')"`;
+          return {
+            parts: ['cmd.exe', '/c', `${setVarR1} && codex resume --last`],
+            shellCommand: 'codex resume --last',
+            needsShell: true,
+          };
+        }
         return {
           parts: ['codex', 'resume', '--last'],
           shellCommand: 'codex resume --last',
           needsShell: false,
         };
       case 'opencode':
-        base.parts.push('--continue');
-        base.shellCommand += ' --continue';
+        appendFlags(base, '--continue');
         break;
       case 'goose':
         // goose session --resume is a subcommand
         if (base.needsShell) {
+          const b64g1 = Buffer.from('goose').toString('base64');
+          const setVarG1 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g1}\\x07')"`;
           const cmd = IS_WIN
-            ? { parts: ['cmd.exe', '/c', 'set GOOSE_MODE=auto && goose session --resume'], shellCommand: 'set GOOSE_MODE=auto && goose session --resume' }
+            ? { parts: ['cmd.exe', '/c', `${setVarG1} && set GOOSE_MODE=auto && goose session --resume`], shellCommand: 'set GOOSE_MODE=auto && goose session --resume' }
             : { parts: ['bash', '-c', 'GOOSE_MODE=auto goose session --resume'], shellCommand: 'GOOSE_MODE=auto goose session --resume' };
           return { ...cmd, needsShell: true };
+        }
+        if (IS_WIN) {
+          const b64g1b = Buffer.from('goose').toString('base64');
+          const setVarG1b = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g1b}\\x07')"`;
+          return {
+            parts: ['cmd.exe', '/c', `${setVarG1b} && goose session --resume`],
+            shellCommand: 'goose session --resume',
+            needsShell: true,
+          };
         }
         return {
           parts: ['goose', 'session', '--resume'],
@@ -509,31 +561,48 @@ function buildResumeCommand(cli: string, sessionId: string | null, cwd?: string)
   // Specific session ID — use targeted resume
   switch (cli) {
     case 'claude':
-      base.parts.push('--resume', validSessionId);
-      base.shellCommand += ` --resume ${validSessionId}`;
+      appendFlags(base, '--resume', validSessionId);
       break;
     case 'gemini':
       // Gemini --resume only accepts "latest" or an index number, not UUIDs.
       // We store the UUID for reconcile/verification but always resume latest.
-      base.parts.push('--resume', 'latest');
-      base.shellCommand += ' --resume latest';
+      appendFlags(base, '--resume', 'latest');
       break;
     case 'codex':
+      if (IS_WIN) {
+        const b64r2 = Buffer.from('codex').toString('base64');
+        const setVarR2 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64r2}\\x07')"`;
+        return {
+          parts: ['cmd.exe', '/c', `${setVarR2} && codex resume ${validSessionId}`],
+          shellCommand: `codex resume ${validSessionId}`,
+          needsShell: true,
+        };
+      }
       return {
         parts: ['codex', 'resume', validSessionId],
         shellCommand: `codex resume ${validSessionId}`,
         needsShell: false,
       };
     case 'opencode':
-      base.parts.push('--session', validSessionId);
-      base.shellCommand += ` --session ${validSessionId}`;
+      appendFlags(base, '--session', validSessionId);
       break;
     case 'goose':
       if (base.needsShell) {
-        const cmd = IS_WIN
-          ? { parts: ['cmd.exe', '/c', `set GOOSE_MODE=auto && goose session --resume --session-id ${validSessionId}`], shellCommand: `set GOOSE_MODE=auto && goose session --resume --session-id ${validSessionId}` }
+        const b64g2 = Buffer.from('goose').toString('base64');
+          const setVarG2 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g2}\\x07')"`;
+          const cmd = IS_WIN
+          ? { parts: ['cmd.exe', '/c', `${setVarG2} && set GOOSE_MODE=auto && goose session --resume --session-id ${validSessionId}`], shellCommand: `set GOOSE_MODE=auto && goose session --resume --session-id ${validSessionId}` }
           : { parts: ['bash', '-c', `GOOSE_MODE=auto goose session --resume --session-id ${validSessionId}`], shellCommand: `GOOSE_MODE=auto goose session --resume --session-id ${validSessionId}` };
         return { ...cmd, needsShell: true };
+      }
+      if (IS_WIN) {
+        const b64g2b = Buffer.from('goose').toString('base64');
+        const setVarG2b = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g2b}\\x07')"`;
+        return {
+          parts: ['cmd.exe', '/c', `${setVarG2b} && goose session --resume --session-id ${validSessionId}`],
+          shellCommand: `goose session --resume --session-id ${validSessionId}`,
+          needsShell: true,
+        };
       }
       return {
         parts: ['goose', 'session', '--resume', '--session-id', validSessionId],
@@ -649,8 +718,10 @@ function resolveCliCommand(cli: string, skipPermissions: boolean, cwd?: string):
         .map(([k, v]) => `set ${k}=${v}`)
         .join(' && ');
       const shellCommand = `${setCommands} && ${parts.join(' ')}`;
+      const b64 = Buffer.from(cli).toString('base64');
+      const setUserVar = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64}\\x07')"`;
       return {
-        parts: ['cmd.exe', '/c', shellCommand],
+        parts: ['cmd.exe', '/c', `${setUserVar} && ${shellCommand}`],
         shellCommand,
         needsShell: true,
       };
@@ -661,6 +732,22 @@ function resolveCliCommand(cli: string, skipPermissions: boolean, cwd?: string):
     const shellCommand = `${envExports} ${parts.join(' ')}`;
     return {
       parts: ['bash', '-c', shellCommand],
+      shellCommand,
+      needsShell: true,
+    };
+  }
+
+  // On Windows, npm-installed CLIs use .cmd wrappers that wezterm cannot
+  // execute directly.  Wrap them in cmd.exe /c so the shell resolves the .cmd.
+  // We also emit an OSC 1337 SetUserVar to tag the pane with its CLI type —
+  // the Lua format-tab-title callback reads p.user_vars.cli for detection,
+  // since some CLIs override the pane title to something non-identifiable.
+  if (IS_WIN && !def.bin.endsWith('.exe')) {
+    const shellCommand = parts.join(' ');
+    const b64 = Buffer.from(cli).toString('base64');
+    const setUserVar = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64}\\x07')"`;
+    return {
+      parts: ['cmd.exe', '/c', `${setUserVar} && ${shellCommand}`],
       shellCommand,
       needsShell: true,
     };
@@ -912,9 +999,9 @@ function detectPaneState(pane: PaneInfo): {
   // Detect CLI from pane title
   let cli: string | null = null;
   if (title.includes('claude')) cli = 'claude';
-  else if (title.includes('gemini')) cli = 'gemini';
+  else if (title.includes('gemini') || title.includes('◇')) cli = 'gemini';
   else if (title.includes('codex')) cli = 'codex';
-  else if (title.includes('opencode')) cli = 'opencode';
+  else if (title.includes('opencode') || title.startsWith('oc |') || title.startsWith('oc |')) cli = 'opencode';
   else if (title.includes('goose')) cli = 'goose';
 
   // Read pane output
@@ -1500,9 +1587,11 @@ server.tool(
     command: z.string().optional().describe('Raw command to run. Ignored if cli is set. Defaults to shell.'),
     cwd: z.string().optional().describe('Working directory'),
     tab_title: z.string().optional().describe('Title for the new tab'),
+    new_window: z.boolean().optional().describe('Create a new window instead of a new tab (default: false)'),
   },
-  async ({ cli, command, cwd, tab_title }) => {
+  async ({ cli, command, cwd, tab_title, new_window }) => {
     const args: string[] = [];
+    if (new_window) args.push('--new-window');
     const dir = resolveCwd(cwd);
     if (dir) args.push('--cwd', dir);
     if (cli) {

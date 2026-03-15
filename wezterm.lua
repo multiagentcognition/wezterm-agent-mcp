@@ -98,12 +98,25 @@ wezterm.on('format-tab-title', function(tab)
   local total = 0
   for _, p in ipairs(tab.panes) do
     local name = 'shell'
-    local t = p.title:lower()
-    if t:find('claude') then name = 'Claude'
-    elseif t:find('gemini') then name = 'Gemini'
-    elseif t:find('codex') then name = 'Codex'
-    elseif t:find('opencode') then name = 'OpenCode'
-    elseif t:find('goose') then name = 'Goose'
+    -- Check user_vars.cli first (set by MCP via OSC 1337 SetUserVar)
+    local uv = p.user_vars and p.user_vars.cli
+    if uv and #uv > 0 then
+      local u = uv:lower()
+      if u == 'claude' then name = 'Claude'
+      elseif u == 'gemini' then name = 'Gemini'
+      elseif u == 'codex' then name = 'Codex'
+      elseif u == 'opencode' then name = 'OpenCode'
+      elseif u == 'goose' then name = 'Goose'
+      end
+    else
+      -- Fallback: detect from pane title
+      local t = p.title:lower()
+      if t:find('claude') then name = 'Claude'
+      elseif t:find('gemini') or t:find('◇') then name = 'Gemini'
+      elseif t:find('codex') then name = 'Codex'
+      elseif t:find('opencode') or t:match('^oc |') then name = 'OpenCode'
+      elseif t:find('goose') then name = 'Goose'
+      end
     end
     counts[name] = (counts[name] or 0) + 1
     total = total + 1
