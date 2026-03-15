@@ -10,11 +10,13 @@
 
 import { execSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { homedir, platform } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+
+const IS_WIN = process.platform === 'win32';
 
 // ---------------------------------------------------------------------------
 // Server Configuration — resolved from env or CLI args
@@ -172,7 +174,7 @@ function captureManifest(): SessionManifest {
       pane_id: p.pane_id,
       cli: state.cli ?? 'shell',
       session_id: sessionId,
-      cwd: p.cwd.replace(/^file:\/\/[^/]*/, ''),
+      cwd: normalizeCwd(p.cwd),
     });
   }
 
@@ -201,21 +203,23 @@ function getSessionId(paneId: number, cli: string): string | null {
     const pane = listPanes().find(p => p.pane_id === paneId);
     if (!pane) return null;
 
-    // Get the TTY, find the CLI's PID on it
-    const ttyShort = pane.tty_name.replace('/dev/', '');
+    // Get the CLI's PID on this pane's TTY
     let cliPid: string | null = null;
-    try {
-      const psOutput = execFileSync('ps', ['-t', ttyShort, '-o', 'pid,comm'], {
-        encoding: 'utf8', timeout: 3000,
-      });
-      for (const line of psOutput.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed.includes(CLI_DEFS[cli]?.bin ?? cli)) {
-          cliPid = trimmed.split(/\s+/)[0] ?? null;
-          break;
+    if (!IS_WIN && pane.tty_name) {
+      const ttyShort = pane.tty_name.replace('/dev/', '');
+      try {
+        const psOutput = execFileSync('ps', ['-t', ttyShort, '-o', 'pid,comm'], {
+          encoding: 'utf8', timeout: 3000,
+        });
+        for (const line of psOutput.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed.includes(CLI_DEFS[cli]?.bin ?? cli)) {
+            cliPid = trimmed.split(/\s+/)[0] ?? null;
+            break;
+          }
         }
-      }
-    } catch { /* ignore */ }
+      } catch { /* ignore */ }
+    }
 
     switch (cli) {
       case 'claude': {
@@ -251,15 +255,21 @@ function getSessionId(paneId: number, cli: string): string | null {
         const codexDir = join(homedir(), '.codex', 'sessions');
         if (!existsSync(codexDir)) return null;
         try {
-          // Find newest rollout file
-          const result = execFileSync('find', [codexDir, '-name', 'rollout-*.jsonl', '-printf', '%T@ %p\n'], {
-            encoding: 'utf8', timeout: 5000,
-          });
-          const files = result.trim().split('\n')
-            .map(l => { const [ts, p] = l.split(' ', 2); return { ts: Number(ts), path: p! }; })
-            .sort((a, b) => b.ts - a.ts);
+          // Walk directory tree with Node.js fs (cross-platform, no GNU find)
+          const files: { mtime: number; path: string }[] = [];
+          const walk = (dir: string) => {
+            for (const entry of readdirSync(dir)) {
+              const full = join(dir, entry);
+              const st = statSync(full);
+              if (st.isDirectory()) { walk(full); }
+              else if (entry.startsWith('rollout-') && entry.endsWith('.jsonl')) {
+                files.push({ mtime: st.mtimeMs, path: full });
+              }
+            }
+          };
+          walk(codexDir);
+          files.sort((a, b) => b.mtime - a.mtime);
           if (files.length > 0) {
-            // Extract session ID from filename
             const match = files[0]!.path.match(/rollout-([^.]+)\.jsonl/);
             return match?.[1] ?? null;
           }
@@ -312,7 +322,8 @@ function getSessionId(paneId: number, cli: string): string | null {
 function buildResumeCommand(cli: string, sessionId: string | null): ResolvedCommand {
   const def = CLI_DEFS[cli];
   if (!def) {
-    return { parts: ['bash'], shellCommand: 'bash', needsShell: false };
+    const shell = IS_WIN ? 'cmd.exe' : 'bash';
+    return { parts: [shell], shellCommand: shell, needsShell: false };
   }
 
   // Validate session exists on disk before trying to resume it
@@ -364,11 +375,10 @@ function buildResumeCommand(cli: string, sessionId: string | null): ResolvedComm
       case 'goose':
         // goose session --resume is a subcommand
         if (base.needsShell) {
-          return {
-            parts: ['bash', '-c', `GOOSE_MODE=auto goose session --resume`],
-            shellCommand: 'GOOSE_MODE=auto goose session --resume',
-            needsShell: true,
-          };
+          const cmd = IS_WIN
+            ? { parts: ['cmd.exe', '/c', 'set GOOSE_MODE=auto && goose session --resume'], shellCommand: 'set GOOSE_MODE=auto && goose session --resume' }
+            : { parts: ['bash', '-c', 'GOOSE_MODE=auto goose session --resume'], shellCommand: 'GOOSE_MODE=auto goose session --resume' };
+          return { ...cmd, needsShell: true };
         }
         return {
           parts: ['goose', 'session', '--resume'],
@@ -401,11 +411,10 @@ function buildResumeCommand(cli: string, sessionId: string | null): ResolvedComm
       break;
     case 'goose':
       if (base.needsShell) {
-        return {
-          parts: ['bash', '-c', `GOOSE_MODE=auto goose session --resume --session-id ${validSessionId}`],
-          shellCommand: `GOOSE_MODE=auto goose session --resume --session-id ${validSessionId}`,
-          needsShell: true,
-        };
+        const cmd = IS_WIN
+          ? { parts: ['cmd.exe', '/c', `set GOOSE_MODE=auto && goose session --resume --session-id ${validSessionId}`], shellCommand: `set GOOSE_MODE=auto && goose session --resume --session-id ${validSessionId}` }
+          : { parts: ['bash', '-c', `GOOSE_MODE=auto goose session --resume --session-id ${validSessionId}`], shellCommand: `GOOSE_MODE=auto goose session --resume --session-id ${validSessionId}` };
+        return { ...cmd, needsShell: true };
       }
       return {
         parts: ['goose', 'session', '--resume', '--session-id', validSessionId],
@@ -471,11 +480,21 @@ function resolveCliCommand(cli: string, skipPermissions: boolean): ResolvedComma
 
   // If env vars are needed, we must run via shell wrapper
   if (skipPermissions && def.skipPermEnv && Object.keys(def.skipPermEnv).length > 0) {
+    if (IS_WIN) {
+      const setCommands = Object.entries(def.skipPermEnv)
+        .map(([k, v]) => `set ${k}=${v}`)
+        .join(' && ');
+      const shellCommand = `${setCommands} && ${parts.join(' ')}`;
+      return {
+        parts: ['cmd.exe', '/c', shellCommand],
+        shellCommand,
+        needsShell: true,
+      };
+    }
     const envExports = Object.entries(def.skipPermEnv)
       .map(([k, v]) => `${k}=${v}`)
       .join(' ');
     const shellCommand = `${envExports} ${parts.join(' ')}`;
-    // Wrap in bash -c so wezterm spawns it correctly
     return {
       parts: ['bash', '-c', shellCommand],
       shellCommand,
@@ -494,12 +513,18 @@ function resolveCliCommand(cli: string, skipPermissions: boolean): ResolvedComma
 // Helpers
 // ---------------------------------------------------------------------------
 
+function sleepMs(ms: number): void {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* busy-wait — only used for short waits in sync code */ }
+}
+
 /**
  * Check if wezterm binary exists on PATH
  */
 function isWezInstalled(): boolean {
   try {
-    execFileSync('which', ['wezterm'], { encoding: 'utf8', timeout: 3000 });
+    const cmd = IS_WIN ? 'where' : 'which';
+    execFileSync(cmd, ['wezterm'], { encoding: 'utf8', timeout: 3000 });
     return true;
   } catch {
     return false;
@@ -524,6 +549,10 @@ function isWezRunning(): boolean {
  */
 function isGuiRunning(): boolean {
   try {
+    if (IS_WIN) {
+      const out = execSync('tasklist /FI "IMAGENAME eq wezterm-gui.exe" /NH', { encoding: 'utf8', timeout: 5000 });
+      return out.includes('wezterm-gui');
+    }
     const out = execSync('pgrep -x wezterm-gui', { encoding: 'utf8', timeout: 3000 });
     return out.trim().length > 0;
   } catch {
@@ -543,20 +572,30 @@ function ensureWezRunning(): { running: boolean; started: boolean } {
 
   // Kill orphaned mux-server with no GUI attached
   if (isWezRunning() && !isGuiRunning()) {
-    try { execSync('pkill -x wezterm-mux-se', { timeout: 3000, shell: '/bin/bash' }); } catch { /* ignore */ }
-    execSync('sleep 0.5', { timeout: 2000, shell: '/bin/bash' });
+    try {
+      if (IS_WIN) {
+        execSync('taskkill /F /IM wezterm-mux-server.exe', { timeout: 3000 });
+      } else {
+        execSync('pkill -x wezterm-mux-se', { timeout: 3000 });
+      }
+    } catch { /* ignore */ }
+    sleepMs(500);
   }
 
   try {
     const cwd = PROJECT_ROOT ?? process.cwd();
-    execSync(`wezterm start --cwd "${cwd}" &`, {
-      encoding: 'utf8',
-      timeout: 5000,
-      shell: '/bin/bash',
-    });
+    if (IS_WIN) {
+      execSync(`start "" wezterm start --cwd "${cwd}"`, {
+        encoding: 'utf8', timeout: 5000, shell: 'cmd.exe',
+      });
+    } else {
+      execSync(`wezterm start --cwd "${cwd}" &`, {
+        encoding: 'utf8', timeout: 5000, shell: '/bin/bash',
+      });
+    }
     // Wait for GUI + mux to come up
     for (let i = 0; i < 10; i++) {
-      execSync('sleep 0.5', { timeout: 2000, shell: '/bin/bash' });
+      sleepMs(500);
       if (isWezRunning() && isGuiRunning()) {
         return { running: true, started: true };
       }
@@ -573,7 +612,15 @@ function ensureWezRunning(): { running: boolean; started: boolean } {
  * We prefer gui-sock-* over the default sock.
  */
 function findGuiSocket(): string | undefined {
-  const socketDir = join('/run/user', String(process.getuid?.()), 'wezterm');
+  let socketDir: string;
+  if (IS_WIN) {
+    // Windows uses named pipes, not unix sockets — wezterm cli finds them automatically
+    return undefined;
+  } else if (process.platform === 'darwin') {
+    socketDir = join(homedir(), '.local', 'share', 'wezterm');
+  } else {
+    socketDir = join('/run/user', String(process.getuid?.()), 'wezterm');
+  }
   try {
     const entries = readdirSync(socketDir);
     // Prefer gui-sock-* (the active GUI instance)
@@ -585,6 +632,16 @@ function findGuiSocket(): string | undefined {
   return undefined;
 }
 
+function weztermBin(): string {
+  if (IS_WIN) {
+    // Try common Windows install paths
+    const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';
+    const candidate = join(programFiles, 'WezTerm', 'wezterm.exe');
+    if (existsSync(candidate)) return candidate;
+  }
+  return 'wezterm';
+}
+
 function wez(...args: string[]): string {
   try {
     const env: Record<string, string> = { ...process.env as Record<string, string> };
@@ -592,7 +649,7 @@ function wez(...args: string[]): string {
     if (guiSocket) {
       env['WEZTERM_UNIX_SOCKET'] = guiSocket;
     }
-    return execFileSync('wezterm', ['cli', ...args], {
+    return execFileSync(weztermBin(), ['cli', ...args], {
       encoding: 'utf8',
       timeout: 10_000,
       env,
@@ -605,6 +662,16 @@ function wez(...args: string[]): string {
 function wezJson(...args: string[]): any {
   const raw = wez(...args, '--format', 'json');
   return JSON.parse(raw);
+}
+
+/** Normalize CWD from wezterm's file:// URI to a local path. Handles Windows drive letters. */
+function normalizeCwd(cwd: string): string {
+  let path = cwd.replace(/^file:\/\/[^/]*/, '');
+  // Windows: file:///C:/foo → /C:/foo — strip leading slash before drive letter
+  if (IS_WIN && /^\/[A-Za-z]:/.test(path)) {
+    path = path.slice(1);
+  }
+  return path.replace(/\/$/, '') || '/';
 }
 
 type PaneInfo = {
@@ -676,7 +743,8 @@ function detectPaneState(pane: PaneInfo): {
   // Detect state
   let state: 'idle' | 'cli-ready' | 'cli-working' | 'exited' = 'idle';
   if (lastOutput.includes('exit_behavior="Hold"') ||
-      /Process ".*" .* completed/.test(lastOutput)) {
+      /Process ".*" .* completed/.test(lastOutput) ||
+      lastOutput.includes('exited with code')) {
     state = 'exited';
   } else if (cli) {
     // CLI is running — check if it's waiting for input or working
@@ -771,7 +839,7 @@ server.tool(
         git_mode: GIT_MODE,
         note: installed
           ? 'Wezterm is installed but not running. Use wez_launch_agents to start it automatically.'
-          : 'Wezterm is not installed. Install with: sudo pacman -S wezterm (Arch) or brew install wezterm (macOS)',
+          : 'Wezterm is not installed. Install with: sudo pacman -S wezterm (Arch), brew install wezterm (macOS), or winget install wez.wezterm (Windows)',
       });
     }
 
@@ -1541,7 +1609,7 @@ server.tool(
     }
 
     const dir = resolveCwd(cwd);
-    const projName = project_name ?? (dir ?? process.cwd()).split('/').pop() ?? 'project';
+    const projName = project_name ?? (basename(dir ?? process.cwd()) || 'project');
 
     // count=0: just open a project window with a shell
     if (count === 0) {
@@ -1879,11 +1947,15 @@ server.tool(
   'Kill ALL panes in ALL tabs. Shuts down every agent.',
   {},
   async () => {
-    const panes = listPanes();
-    for (const p of panes) {
-      try { wez('kill-pane', '--pane-id', String(p.pane_id)); } catch { /* ignore */ }
-    }
-    return ok({ killed: panes.length });
+    let count = 0;
+    try {
+      const panes = listPanes();
+      count = panes.length;
+      for (const p of panes) {
+        try { wez('kill-pane', '--pane-id', String(p.pane_id)); } catch { /* ignore — last pane kill closes wezterm */ }
+      }
+    } catch { /* ignore — wezterm may close mid-loop */ }
+    return ok({ killed: count });
   },
 );
 
@@ -1915,7 +1987,7 @@ server.tool(
       sessionId = getSessionId(pane_id, detectedCli);
     }
 
-    const cwd = target.cwd.replace(/^file:\/\/[^/]*/, '');
+    const cwd = normalizeCwd(target.cwd);
     const tabId = target.tab_id;
 
     // Kill the pane
@@ -2007,11 +2079,17 @@ server.tool(
     }
     const dir = resolveCwd(cwd) ?? process.cwd();
     try {
-      execSync(`wezterm start --cwd "${dir}" &`, {
-        encoding: 'utf8', timeout: 5000, shell: '/bin/bash',
-      });
+      if (IS_WIN) {
+        execSync(`start "" wezterm start --cwd "${dir}"`, {
+          encoding: 'utf8', timeout: 5000, shell: 'cmd.exe',
+        });
+      } else {
+        execSync(`wezterm start --cwd "${dir}" &`, {
+          encoding: 'utf8', timeout: 5000, shell: '/bin/bash',
+        });
+      }
       for (let i = 0; i < 10; i++) {
-        execSync('sleep 0.5', { timeout: 2000, shell: '/bin/bash' });
+        sleepMs(500);
         if (isWezRunning()) {
           return ok({ running: true, started: true, cwd: dir });
         }
