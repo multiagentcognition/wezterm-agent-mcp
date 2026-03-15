@@ -54,27 +54,28 @@ Turns [Wezterm](https://wezfurlong.org/wezterm/) into a remote-controllable term
 
 ### Install and configure
 
-One command from your project directory:
+One command:
 
 ```bash
 npx wezterm-agent-mcp init
 ```
 
-This checks that Wezterm is installed, then auto-configures the MCP server for all supported AI coding tools:
+This checks that Wezterm is installed, then registers the MCP server globally for all AI coding tools:
 
-| File | For |
+| Config file | For |
 |---|---|
-| `.mcp.json` | Claude Code, Codex |
-| `.cursor/mcp.json` | Cursor |
-| `.vscode/mcp.json` | VS Code |
-| `.gemini/settings.json` | Gemini CLI |
-| `opencode.json` | OpenCode |
+| `~/.claude/settings.json` | Claude Code, Codex |
+| `~/.cursor/mcp.json` | Cursor |
+| VS Code user `mcp.json` | VS Code (platform-specific path) |
+| `~/.gemini/settings.json` | Gemini CLI |
+| `~/.config/opencode/...` | OpenCode (platform-specific path) |
 
-Existing config files are merged — other MCP servers you've configured won't be touched. Re-running is safe (idempotent).
+One run, every project, every tool. Existing config files are merged — other MCP servers won't be touched. Re-running is safe (idempotent).
 
-Use `--root` to target a different directory:
+For per-project setup instead (writes config into the project directory):
 
 ```bash
+npx wezterm-agent-mcp init --project
 npx wezterm-agent-mcp init --root /path/to/project
 ```
 
