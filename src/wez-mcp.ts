@@ -910,12 +910,10 @@ function projectSpawnArgs(dir: string | undefined, newWindow?: boolean): string[
 }
 
 function sendTextAndSubmit(paneId: number, text: string): void {
-  // Send text via paste mode (fast, atomic), small settle, then Enter.
-  // Paste mode uses bracketed paste (\x1b[200~ ... \x1b[201~) so the TUI
-  // receives the text as a block. Enter must be sent separately after
-  // the paste brackets close. A brief settle lets the TUI process the paste.
+  // Paste text (bracketed paste — atomic), then send Enter via keyboard mode.
+  // Both wez() calls are synchronous (execFileSync), so the paste is fully
+  // delivered before the Enter send begins. No artificial delay needed.
   wez('send-text', '--pane-id', String(paneId), text);
-  sleepMs(OS.pasteSettleMs);
   wez('send-text', '--pane-id', String(paneId), '--no-paste', '\x0d');
 }
 

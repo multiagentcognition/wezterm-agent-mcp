@@ -99,7 +99,7 @@ const unix: Omit<Platform, 'name' | 'socketDir' | 'weztermGuiBin' | 'screenshotC
   shell: '/bin/bash',
   defaultShell: 'bash',
   enterKey: '\x0d',  // CR — PTY icrnl translates to LF
-  pasteSettleMs: 150,
+  pasteSettleMs: 0,
 
   weztermBin(): string {
     return 'wezterm';
@@ -277,7 +277,7 @@ const windows: Platform = {
   shell: true as const,
   defaultShell: 'cmd.exe',
   enterKey: '\x0d',  // CR — same as Unix; ConPTY handles it when sent via --no-paste
-  pasteSettleMs: 150, // Same as Unix — previous failures were caused by wrong enterKey (\n), not timing
+  pasteSettleMs: 0, // Same as Unix — previous failures were caused by wrong enterKey (\n), not timing
 
   weztermBin(): string {
     const candidate = join(winWeztermDir(), 'wezterm.exe');
