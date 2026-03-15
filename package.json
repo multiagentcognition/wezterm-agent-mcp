@@ -1,9 +1,26 @@
 {
-  "name": "wezterm-mcp",
+  "name": "wezterm-agent-mcp",
   "version": "0.1.0",
   "type": "module",
   "description": "Wezterm MCP Server — programmable terminal control plane for multi-agent AI workflows",
   "license": "PolyForm-Strict-1.0.0",
+  "homepage": "https://github.com/multiagentcognition/wezterm-agent-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/multiagentcognition/wezterm-agent-mcp.git"
+  },
+  "keywords": [
+    "wezterm",
+    "mcp",
+    "terminal",
+    "multi-agent",
+    "ai",
+    "claude",
+    "codex",
+    "gemini",
+    "opencode",
+    "orchestration"
+  ],
   "main": "./build/wez-mcp.js",
   "bin": {
     "wezterm-mcp": "build/wez-mcp.js"
@@ -11,7 +28,8 @@
   "files": [
     "build/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "wezterm.lua"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
