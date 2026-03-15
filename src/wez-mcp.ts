@@ -162,6 +162,13 @@ function captureManifest(): SessionManifest {
     }).trim() || null;
   } catch { /* ignore */ }
 
+  // Pre-compute all pane contexts once (avoids redundant subprocess calls in getSessionId)
+  const contexts = new Map<number, PaneContext>();
+  for (const p of panes) {
+    const state = detectPaneState(p);
+    contexts.set(p.pane_id, { cli: state.cli, cwd: normalizeCwd(p.cwd), ttyName: p.tty_name });
+  }
+
   const windows = new Map<number, WindowManifest>();
 
   for (const p of panes) {
@@ -176,14 +183,14 @@ function captureManifest(): SessionManifest {
       win.tabs.push(tab);
     }
 
-    const state = detectPaneState(p);
-    const sessionId = state.cli ? getSessionId(p.pane_id, state.cli) : null;
+    const ctx = contexts.get(p.pane_id)!;
+    const sessionId = ctx.cli ? getSessionId(p.pane_id, ctx.cli, contexts) : null;
 
     tab.panes.push({
       pane_id: p.pane_id,
-      cli: state.cli ?? 'shell',
+      cli: ctx.cli ?? 'shell',
       session_id: sessionId,
-      cwd: normalizeCwd(p.cwd),
+      cwd: ctx.cwd,
     });
   }
 
@@ -195,37 +202,12 @@ function captureManifest(): SessionManifest {
   };
 }
 
-/**
- * Get the PID of the CLI process running on a pane's TTY.
- * Handles both native binaries (claude, opencode) and Node.js CLIs
- * (codex, gemini) which show as "node" in ps output.
- */
-function getCliPid(ttyName: string, cli: string): string | null {
-  if (OS.name === 'windows' || !ttyName) return null;
-  const ttyShort = ttyName.replace('/dev/', '');
-  try {
-    const psOutput = execFileSync('ps', ['-t', ttyShort, '-o', 'pid,args'], {
-      encoding: 'utf8', timeout: 3000,
-    });
-    const bin = CLI_DEFS[cli]?.bin ?? cli;
-    for (const line of psOutput.split('\n')) {
-      const trimmed = line.trim();
-      // Match by binary name anywhere in the args column
-      // This catches both native binaries ("claude --flags") and
-      // Node.js CLIs ("node /path/to/codex --flags")
-      if (trimmed.includes(`/${bin}`) || trimmed.match(new RegExp(`\\b${bin}\\b`))) {
-        const pid = trimmed.split(/\s+/)[0];
-        if (pid && /^\d+$/.test(pid)) return pid;
-      }
-    }
-  } catch { /* ignore */ }
-  return null;
-}
+/** Pre-computed pane context for efficient session ID resolution. */
+type PaneContext = { cli: string | null; cwd: string; ttyName: string };
 
 /**
  * Get session ID for a CLI running in a pane.
- * Uses per-pane PID and CWD matching to correctly identify which session
- * belongs to which pane, even when multiple instances of the same CLI run.
+ * Accepts pre-computed pane contexts to avoid redundant subprocess calls.
  *
  * Per-CLI session storage:
  * - Claude: ~/.claude/sessions/{PID}.json → { sessionId, cwd }
@@ -234,24 +216,22 @@ function getCliPid(ttyName: string, cli: string): string | null {
  * - OpenCode: ~/.local/share/opencode/opencode.db (SQLite, session table with directory column)
  * - Goose: goose session list --format json
  */
-function getSessionId(paneId: number, cli: string): string | null {
+function getSessionId(paneId: number, cli: string, allContexts: Map<number, PaneContext>): string | null {
   try {
-    const allPanes = listPanes();
-    const pane = allPanes.find(p => p.pane_id === paneId);
-    if (!pane) return null;
+    const ctx = allContexts.get(paneId);
+    if (!ctx) return null;
 
-    const paneCwd = normalizeCwd(pane.cwd);
-    const cliPid = getCliPid(pane.tty_name, cli);
+    const paneCwd = ctx.cwd;
+    const bin = CLI_DEFS[cli]?.bin ?? cli;
+    const cliPid = OS.getCliPid(ctx.ttyName, bin);
 
     // Count how many panes run the same CLI type in the SAME CWD.
     // CWD-based session matching is safe when each instance has a unique CWD.
     // Only when 2+ instances of the same CLI share a CWD do we bail out,
     // since the filesystem fallback can't distinguish them.
-    const sameCli = allPanes.filter(p => {
-      const s = detectPaneState(p);
-      return s.cli === cli;
-    });
-    const sameCliSameCwd = sameCli.filter(p => pathsEqual(normalizeCwd(p.cwd), paneCwd));
+    const sameCliSameCwd = [...allContexts.values()].filter(
+      c => c.cli === cli && pathsEqual(c.cwd, paneCwd),
+    );
     const multipleInstances = sameCliSameCwd.length > 1;
 
     switch (cli) {
@@ -390,18 +370,15 @@ function getSessionId(paneId: number, cli: string): string | null {
           join(homedir(), '.local', 'share', 'opencode', 'opencode.db'),
           join(homedir(), '.opencode', 'opencode.db'),
         ];
-        // Try both slash variants on Windows (DB may store either format)
-        const cwdVariants = [paneCwd];
-        if (OS.name === 'windows') {
-          const alt = paneCwd.includes('/') ? paneCwd.replace(/\//g, '\\') : paneCwd.replace(/\\/g, '/');
-          if (alt !== paneCwd) cwdVariants.push(alt);
-        }
+        // Try all path variants (forward/backslash on Windows)
+        const cwdVariants = OS.pathVariants(paneCwd);
         for (const dbPath of dbPaths) {
           if (!existsSync(dbPath)) continue;
           for (const cwdVar of cwdVariants) {
             try {
+              const escaped = cwdVar.replace(/'/g, "''");
               const result = execFileSync('sqlite3', [dbPath,
-                `SELECT id FROM session WHERE directory = '${cwdVar}' ORDER BY rowid DESC LIMIT 1;`
+                `SELECT id FROM session WHERE directory = '${escaped}' ORDER BY rowid DESC LIMIT 1;`
               ], { encoding: 'utf8', timeout: 5000 }).trim();
               if (result) return result;
             } catch { /* ignore */ }
@@ -449,7 +426,7 @@ function getSessionId(paneId: number, cli: string): string | null {
 function buildResumeCommand(cli: string, sessionId: string | null, cwd?: string): ResolvedCommand {
   const def = CLI_DEFS[cli];
   if (!def) {
-    const defaultShell = OS.name === 'windows' ? 'cmd.exe' : 'bash';
+    const defaultShell = OS.defaultShell;
     return { parts: [defaultShell], shellCommand: defaultShell, needsShell: false };
   }
   // Pre-trust the directory so the CLI doesn't prompt on resume
@@ -622,8 +599,11 @@ function ensureCliTrust(cli: string, cwd: string): void {
         try {
           existing = JSON.parse(readFileSync(trustFile, 'utf8'));
         } catch { /* file doesn't exist yet */ }
-        if (!existing[cwd]) {
-          existing[cwd] = 'TRUST_FOLDER';
+        // Check all path variants (forward/backslash on Windows)
+        const alreadyTrusted = OS.pathVariants(cwd).some(v => existing[v]);
+        if (!alreadyTrusted) {
+          const fwdCwd = cwd.replace(/\\/g, '/');
+          existing[fwdCwd] = 'TRUST_FOLDER';
           mkdirSync(dirname(trustFile), { recursive: true });
           writeFileSync(trustFile, JSON.stringify(existing, null, 2) + '\n', 'utf8');
         }
@@ -700,10 +680,7 @@ function resolveCliCommand(cli: string, skipPermissions: boolean, cwd?: string):
   if (skipPermissions && def.skipPermEnv && Object.keys(def.skipPermEnv).length > 0) {
     const envParts = Object.entries(def.skipPermEnv)
       .map(([k, v]) => OS.setEnvCmd(k, v));
-    const cmdStr = parts.join(' ');
-    const shellCommand = OS.name === 'windows'
-      ? `${envParts.join(' && ')} && ${cmdStr}`
-      : `${envParts.join(' ')} ${cmdStr}`;
+    const shellCommand = OS.envShellCommand(envParts, parts.join(' '));
     return OS.wrapCliForSpawn(cli, OS.shellExec(shellCommand));
   }
 
@@ -894,7 +871,7 @@ function projectSpawnArgs(dir: string | undefined, newWindow?: boolean): string[
       const allPanes = listPanes();
       let existingPaneId: number | undefined;
       for (const p of allPanes) {
-        if (normalizeCwd(p.cwd) === targetCwd) {
+        if (pathsEqual(normalizeCwd(p.cwd), targetCwd)) {
           existingPaneId = p.pane_id;
           break;
         }
@@ -940,7 +917,7 @@ function detectPaneState(pane: PaneInfo): {
   if (title.includes('claude')) cli = 'claude';
   else if (title.includes('gemini') || title.includes('◇')) cli = 'gemini';
   else if (title.includes('codex')) cli = 'codex';
-  else if (title.includes('opencode') || title.startsWith('oc |') || title.startsWith('oc |')) cli = 'opencode';
+  else if (title.includes('opencode') || title.startsWith('oc |')) cli = 'opencode';
   else if (title.includes('goose')) cli = 'goose';
 
   // Read pane output
@@ -2214,7 +2191,13 @@ server.tool(
     // Get session ID before killing if resume requested
     let sessionId: string | null = null;
     if (resume) {
-      sessionId = getSessionId(pane_id, detectedCli);
+      const allPanes = listPanes();
+      const contexts = new Map<number, PaneContext>();
+      for (const p of allPanes) {
+        const s = detectPaneState(p);
+        contexts.set(p.pane_id, { cli: s.cli, cwd: normalizeCwd(p.cwd), ttyName: p.tty_name });
+      }
+      sessionId = getSessionId(pane_id, detectedCli, contexts);
     }
 
     const cwd = normalizeCwd(target.cwd);
@@ -2337,12 +2320,18 @@ server.tool(
     const manifest = loadManifest();
     const livePanes = listPanes();
 
-    // Build live state map
-    const liveMap = new Map<number, { cli: string | null; state: string; session_id: string | null }>();
+    // Pre-compute contexts once, then build live state map
+    const contexts = new Map<number, PaneContext>();
     for (const p of livePanes) {
       const state = detectPaneState(p);
-      const sessionId = state.cli ? getSessionId(p.pane_id, state.cli) : null;
-      liveMap.set(p.pane_id, { cli: state.cli, state: state.state, session_id: sessionId });
+      contexts.set(p.pane_id, { cli: state.cli, cwd: normalizeCwd(p.cwd), ttyName: p.tty_name });
+    }
+    const liveMap = new Map<number, { cli: string | null; state: string; session_id: string | null }>();
+    for (const p of livePanes) {
+      const ctx = contexts.get(p.pane_id)!;
+      const state = detectPaneState(p);
+      const sessionId = ctx.cli ? getSessionId(p.pane_id, ctx.cli, contexts) : null;
+      liveMap.set(p.pane_id, { cli: ctx.cli, state: state.state, session_id: sessionId });
     }
 
     if (!manifest) {
@@ -2549,6 +2538,9 @@ server.tool(
     for (const pid of startupPaneIds) {
       try { wez('kill-pane', '--pane-id', String(pid)); } catch { /* ignore — might already be gone */ }
     }
+
+    // Auto-save manifest with new pane IDs so reconcile works immediately
+    try { saveManifest(captureManifest()); } catch { /* best effort */ }
 
     const allRecoveredPanes = recoveredWindows.flatMap(w => w.tabs.flatMap(t => t.panes));
     const totalPanes = allRecoveredPanes.length;

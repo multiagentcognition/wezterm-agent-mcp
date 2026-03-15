@@ -41,12 +41,22 @@ export interface Platform {
   // --- Shell execution ----------------------------------------------------
   /** Value for execSync's `shell` option. */
   readonly shell: string | true;
+  /** Default interactive shell binary (bash / cmd.exe). */
+  readonly defaultShell: string;
   /** Wrap a command string for shell execution → [shell, flag, cmd]. */
   shellExec(cmd: string): string[];
   /** Syntax for setting an env var inline: 'KEY=val' (unix) / 'set KEY=val' (win). */
   setEnvCmd(key: string, val: string): string;
+  /** Build a shell command with env var prefixes: 'K=v cmd' (unix) / 'set K=v && cmd' (win). */
+  envShellCommand(envParts: string[], cmd: string): string;
   /** Cross-platform synchronous sleep. */
   sleep(seconds: number): void;
+
+  // --- Process introspection -----------------------------------------------
+  /** Find the PID of a CLI binary running on a given TTY/pane. */
+  getCliPid(ttyName: string, binName: string): string | null;
+  /** Return both slash variants of a path (forward + backslash). Single-item on Unix. */
+  pathVariants(cwd: string): string[];
 
   // --- Path handling ------------------------------------------------------
   /** Normalise a file:// URI (as returned by wezterm list) to a local path. */
@@ -83,6 +93,7 @@ export interface Platform {
 
 const unix: Omit<Platform, 'name' | 'socketDir' | 'weztermGuiBin' | 'screenshotCmds' | 'screenshotErrorMsg' | 'toggleFullscreen' | 'fullscreenErrorMsg'> = {
   shell: '/bin/bash',
+  defaultShell: 'bash',
 
   weztermBin(): string {
     return 'wezterm';
@@ -120,8 +131,34 @@ const unix: Omit<Platform, 'name' | 'socketDir' | 'weztermGuiBin' | 'screenshotC
     return `${key}=${val}`;
   },
 
+  envShellCommand(envParts: string[], cmd: string): string {
+    return `${envParts.join(' ')} ${cmd}`;
+  },
+
   sleep(seconds: number): void {
     sleepMs(seconds * 1000);
+  },
+
+  getCliPid(ttyName: string, binName: string): string | null {
+    if (!ttyName) return null;
+    const ttyShort = ttyName.replace('/dev/', '');
+    try {
+      const psOutput = execFileSync('ps', ['-t', ttyShort, '-o', 'pid,args'], {
+        encoding: 'utf8', timeout: 3000,
+      });
+      for (const line of psOutput.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.includes(`/${binName}`) || trimmed.match(new RegExp(`\\b${binName}\\b`))) {
+          const pid = trimmed.split(/\s+/)[0];
+          if (pid && /^\d+$/.test(pid)) return pid;
+        }
+      }
+    } catch { /* ignore */ }
+    return null;
+  },
+
+  pathVariants(cwd: string): string[] {
+    return [cwd];
   },
 
   normalizeCwd(raw: string): string {
@@ -232,6 +269,7 @@ function winSetUserVar(cli: string): string {
 const windows: Platform = {
   name: 'windows',
   shell: true as const,
+  defaultShell: 'cmd.exe',
 
   weztermBin(): string {
     const candidate = join(winWeztermDir(), 'wezterm.exe');
@@ -285,8 +323,24 @@ const windows: Platform = {
     return `set ${key}=${val}`;
   },
 
+  envShellCommand(envParts: string[], cmd: string): string {
+    return `${envParts.join(' && ')} && ${cmd}`;
+  },
+
   sleep(seconds: number): void {
     sleepMs(seconds * 1000);
+  },
+
+  getCliPid(_ttyName: string, _binName: string): string | null {
+    // Windows panes have no TTY. CWD-based session matching handles this.
+    return null;
+  },
+
+  pathVariants(cwd: string): string[] {
+    const fwd = cwd.replace(/\\/g, '/');
+    const bk = cwd.replace(/\//g, '\\');
+    const set = new Set([cwd, fwd, bk]);
+    return [...set];
   },
 
   normalizeCwd(raw: string): string {
