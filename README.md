@@ -45,56 +45,22 @@ Turns [Wezterm](https://wezfurlong.org/wezterm/) into a remote-controllable term
 +---------------------------------------------------+
 ```
 
-## Installation
+## Quick Start
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v18+)
+- [Node.js](https://nodejs.org/) (v22.5+)
 - [Wezterm](https://wezfurlong.org/wezterm/installation)
 
-### Install from npm
+### Install and configure
 
-```bash
-npm install -g wezterm-agent-mcp
-```
-
-### Or install from source
-
-```bash
-git clone https://github.com/multiagentcognition/wezterm-agent-mcp.git
-cd wezterm-agent-mcp
-npm install
-npm run build
-```
-
-### Wezterm Lua Config
-
-Copy `wezterm.lua` to your Wezterm config directory:
-
-```bash
-# Linux / macOS
-cp node_modules/wezterm-agent-mcp/wezterm.lua ~/.config/wezterm/wezterm.lua
-
-# Windows
-copy node_modules\wezterm-agent-mcp\wezterm.lua %USERPROFILE%\.config\wezterm\wezterm.lua
-```
-
-It provides:
-- **Auto-maximize** on startup
-- **Window titles** derived from project directory
-- **N/M numbering** for multiple windows of the same project
-- **Tab titles** auto-derived from pane CLI contents (e.g., "Claude (3) + shell")
-- **F11** toggles fullscreen
-
-## Setup
-
-From your project directory:
+One command from your project directory:
 
 ```bash
 npx wezterm-agent-mcp init
 ```
 
-This auto-configures the MCP server for every supported AI coding CLI in one shot:
+This checks that Wezterm is installed, then auto-configures the MCP server for all supported AI coding tools:
 
 | File | For |
 |---|---|
@@ -104,7 +70,7 @@ This auto-configures the MCP server for every supported AI coding CLI in one sho
 | `.gemini/settings.json` | Gemini CLI |
 | `opencode.json` | OpenCode |
 
-Existing config files are merged — other MCP servers you've configured won't be touched.
+Existing config files are merged — other MCP servers you've configured won't be touched. Re-running is safe (idempotent).
 
 Use `--root` to target a different directory:
 
@@ -112,7 +78,27 @@ Use `--root` to target a different directory:
 npx wezterm-agent-mcp init --root /path/to/project
 ```
 
-Re-running is safe (idempotent) — it only writes if something changed.
+### Wezterm Lua config (optional)
+
+The package includes a `wezterm.lua` with auto-maximize, project-derived window titles, N/M numbering, auto tab titles, and F11 fullscreen. To use it:
+
+```bash
+# After npx downloads the package, copy from the npm cache:
+npx -y wezterm-agent-mcp --help  # ensures package is cached
+cp $(npm root -g)/wezterm-agent-mcp/wezterm.lua ~/.config/wezterm/wezterm.lua
+
+# Or from a cloned repo:
+cp wezterm.lua ~/.config/wezterm/wezterm.lua
+```
+
+### Install from source
+
+```bash
+git clone https://github.com/multiagentcognition/wezterm-agent-mcp.git
+cd wezterm-agent-mcp
+npm install && npm run build
+npx . init  # configure MCP for this project
+```
 
 ### Environment Variables
 
