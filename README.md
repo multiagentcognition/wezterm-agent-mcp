@@ -52,11 +52,17 @@ Turns [Wezterm](https://wezfurlong.org/wezterm/) into a remote-controllable term
 - [Node.js](https://nodejs.org/) (v18+)
 - [Wezterm](https://wezfurlong.org/wezterm/installation)
 
-### Setup
+### Install from npm
 
 ```bash
-git clone https://github.com/multiagentcognition/wezterm-mcp.git
-cd wezterm-mcp
+npm install -g wezterm-agent-mcp
+```
+
+### Or install from source
+
+```bash
+git clone https://github.com/multiagentcognition/wezterm-agent-mcp.git
+cd wezterm-agent-mcp
 npm install
 npm run build
 ```
@@ -66,14 +72,11 @@ npm run build
 Copy `wezterm.lua` to your Wezterm config directory:
 
 ```bash
-# Linux
-cp wezterm.lua ~/.config/wezterm/wezterm.lua
-
-# macOS
-cp wezterm.lua ~/.config/wezterm/wezterm.lua
+# Linux / macOS
+cp node_modules/wezterm-agent-mcp/wezterm.lua ~/.config/wezterm/wezterm.lua
 
 # Windows
-copy wezterm.lua %USERPROFILE%\.config\wezterm\wezterm.lua
+copy node_modules\wezterm-agent-mcp\wezterm.lua %USERPROFILE%\.config\wezterm\wezterm.lua
 ```
 
 It provides:
@@ -91,8 +94,7 @@ Add to your MCP client config (e.g., `.mcp.json`, Claude Code settings, etc.):
 {
   "mcpServers": {
     "wezterm": {
-      "command": "node",
-      "args": ["/path/to/wezterm-mcp/build/wez-mcp.js"],
+      "command": "wezterm-agent-mcp",
       "env": {
         "WEZ_PROJECT_ROOT": "/path/to/your/project"
       }
