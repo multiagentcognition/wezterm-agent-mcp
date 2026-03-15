@@ -910,11 +910,10 @@ function projectSpawnArgs(dir: string | undefined, newWindow?: boolean): string[
 }
 
 function sendTextAndSubmit(paneId: number, text: string): void {
-  // Two-step: paste text, then send Enter separately.
-  // Bracketed paste wraps text in escape sequences so \n inside is literal —
-  // Enter MUST be a separate --no-paste send outside the paste brackets.
-  // Windows ConPTY needs ~2s for the paste buffer to fully flush before
-  // the TUI input field accepts Enter. Unix PTY is nearly instant.
+  // Send text via paste mode (fast, atomic), small settle, then Enter.
+  // Paste mode uses bracketed paste (\x1b[200~ ... \x1b[201~) so the TUI
+  // receives the text as a block. Enter must be sent separately after
+  // the paste brackets close. A brief settle lets the TUI process the paste.
   wez('send-text', '--pane-id', String(paneId), text);
   sleepMs(OS.pasteSettleMs);
   wez('send-text', '--pane-id', String(paneId), '--no-paste', '\x0d');
