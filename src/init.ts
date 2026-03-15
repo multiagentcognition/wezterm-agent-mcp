@@ -28,7 +28,8 @@ function readJsonFile<T>(filePath: string): T | undefined {
   if (!existsSync(filePath)) {
     return undefined;
   }
-  return JSON.parse(readFileSync(filePath, 'utf8')) as T;
+  const raw = readFileSync(filePath, 'utf8').trim();
+  return raw ? JSON.parse(raw) as T : undefined;
 }
 
 function writeJsonIfChanged(
