@@ -8,7 +8,7 @@
  * and manage layouts without knowing the CLI syntax.
  */
 
-import { execSync, execFileSync } from 'node:child_process';
+import { execSync, execFileSync, spawn as nodeSpawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -17,6 +17,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
 
 // ---------------------------------------------------------------------------
 // Server Configuration — resolved from env or CLI args
@@ -535,12 +536,17 @@ function sleepMs(ms: number): void {
 }
 
 /**
- * Check if wezterm binary exists on PATH
+ * Check if wezterm binary exists on PATH or in common install locations.
  */
 function isWezInstalled(): boolean {
+  // Check common install path on Windows first (often not in PATH)
+  if (IS_WIN) {
+    const progFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';
+    if (existsSync(join(progFiles, 'WezTerm', 'wezterm.exe'))) return true;
+  }
   try {
     const cmd = IS_WIN ? 'where' : 'which';
-    execFileSync(cmd, ['wezterm'], { encoding: 'utf8', timeout: 3000 });
+    execFileSync(cmd, ['wezterm'], { encoding: 'utf8', timeout: 3000, stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -598,25 +604,19 @@ function ensureWezRunning(): { running: boolean; started: boolean } {
     sleepMs(500);
   }
 
-  try {
-    const cwd = PROJECT_ROOT ?? process.cwd();
-    if (IS_WIN) {
-      execSync(`start "" wezterm start --cwd "${cwd}"`, {
-        encoding: 'utf8', timeout: 5000, shell: 'cmd.exe',
-      });
-    } else {
-      execSync(`wezterm start --cwd "${cwd}" &`, {
-        encoding: 'utf8', timeout: 5000, shell: '/bin/bash',
-      });
+  // Launch WezTerm GUI as a detached process (cross-platform)
+  const cwd = PROJECT_ROOT ?? process.cwd();
+  if (!launchWeztermDetached(cwd)) {
+    return { running: false, started: false };
+  }
+
+  // Wait for GUI + mux socket to come up
+  for (let i = 0; i < 20; i++) {
+    sleepMs(500);
+    if (isWezRunning()) {
+      return { running: true, started: true };
     }
-    // Wait for GUI + mux to come up
-    for (let i = 0; i < 10; i++) {
-      sleepMs(500);
-      if (isWezRunning() && isGuiRunning()) {
-        return { running: true, started: true };
-      }
-    }
-  } catch { /* ignore */ }
+  }
 
   return { running: false, started: false };
 }
@@ -630,9 +630,10 @@ function ensureWezRunning(): { running: boolean; started: boolean } {
 function findGuiSocket(): string | undefined {
   let socketDir: string;
   if (IS_WIN) {
-    // Windows uses named pipes, not unix sockets — wezterm cli finds them automatically
-    return undefined;
-  } else if (process.platform === 'darwin') {
+    // Windows stores socket files in ~/.local/share/wezterm/
+    // wezterm cli does NOT auto-discover them — we must set WEZTERM_UNIX_SOCKET
+    socketDir = join(homedir(), '.local', 'share', 'wezterm');
+  } else if (IS_MAC) {
     socketDir = join(homedir(), '.local', 'share', 'wezterm');
   } else {
     socketDir = join('/run/user', String(process.getuid?.()), 'wezterm');
@@ -656,6 +657,39 @@ function weztermBin(): string {
     if (existsSync(candidate)) return candidate;
   }
   return 'wezterm';
+}
+
+/** Resolve the wezterm-gui binary for direct launch (not the CLI wrapper). */
+function weztermGuiBin(): string {
+  if (IS_WIN) {
+    const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';
+    const candidate = join(programFiles, 'WezTerm', 'wezterm-gui.exe');
+    if (existsSync(candidate)) return candidate;
+  }
+  // On macOS, wezterm-gui is inside the app bundle
+  if (IS_MAC) {
+    const appBin = '/Applications/WezTerm.app/Contents/MacOS/wezterm-gui';
+    if (existsSync(appBin)) return appBin;
+  }
+  return 'wezterm-gui';
+}
+
+/**
+ * Launch WezTerm GUI as a detached process. Works on all platforms.
+ * Uses child_process.spawn with detached+unref so it outlives the MCP process.
+ */
+function launchWeztermDetached(cwd: string): boolean {
+  try {
+    const bin = weztermGuiBin();
+    const child = nodeSpawn(bin, ['start', '--cwd', cwd], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function wez(...args: string[]): string {
@@ -2095,16 +2129,10 @@ server.tool(
     }
     const dir = resolveCwd(cwd) ?? process.cwd();
     try {
-      if (IS_WIN) {
-        execSync(`start "" wezterm start --cwd "${dir}"`, {
-          encoding: 'utf8', timeout: 5000, shell: 'cmd.exe',
-        });
-      } else {
-        execSync(`wezterm start --cwd "${dir}" &`, {
-          encoding: 'utf8', timeout: 5000, shell: '/bin/bash',
-        });
+      if (!launchWeztermDetached(dir)) {
+        return ok({ running: false, started: false, error: 'Failed to launch Wezterm process.' });
       }
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 20; i++) {
         sleepMs(500);
         if (isWezRunning()) {
           return ok({ running: true, started: true, cwd: dir });
