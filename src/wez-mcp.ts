@@ -128,7 +128,7 @@ type SessionManifest = {
   windows: WindowManifest[];
 };
 
-const MANIFEST_DIR = join(homedir(), '.macp');
+const MANIFEST_DIR = PROJECT_ROOT ? join(PROJECT_ROOT, '.wezterm') : join(homedir(), '.macp');
 const MANIFEST_PATH = join(MANIFEST_DIR, 'wez-session.json');
 
 function saveManifest(manifest: SessionManifest): void {
