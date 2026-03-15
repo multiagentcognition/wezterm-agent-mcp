@@ -4,9 +4,30 @@ Cross-platform test to verify that `wez_session_save` and `wez_session_recover`
 correctly restore all windows, panes, CLI types, projects, agent conversation
 history (session IDs), and auto-generated window/tab titles.
 
-## Pre-Flight: Install and Auth Check
+## Pre-Flight: Tool Discovery
 
-Before anything else, verify that all required CLIs are installed, on `PATH`,
+Before doing anything else, fetch and read the full schema for **every**
+`wez_*` MCP tool that this test will use. At minimum:
+
+    wez_start, wez_spawn, wez_split, wez_list, wez_status,
+    wez_send_text_submit, wez_read_all_deep,
+    wez_session_save, wez_session_recover, wez_reconcile,
+    wez_kill_all, wez_launch_mixed, wez_launch_grid,
+    wez_move_to_tab, wez_set_tab_title, wez_screenshot_all_tabs
+
+For each tool, note:
+- Required vs optional parameters
+- Enum values and their meanings
+- Whether it creates a **window** vs a **tab** vs a **pane**
+- Any flags needed to get the desired behavior (e.g. `new_window` on `wez_spawn`)
+
+**Do not proceed until you have confirmed that the available tools can create
+separate windows, split panes, and add tabs to existing windows.** If any
+capability is missing, stop and report it before attempting the launch phase.
+
+## Install and Auth Check
+
+Verify that all required CLIs are installed, on `PATH`,
 and authenticated. If any check fails, stop and resolve it before continuing.
 
 ### Step 1 — Check installation
@@ -26,18 +47,18 @@ Re-check after install to confirm it is on `PATH`.
 
 ### Step 2 — Check authentication
 
-Each CLI requires its own API key or auth session. Run the auth check for each:
+All CLIs use OAuth login — no API keys needed. Run each auth check:
 
 | CLI      | Auth check                                      | How to authenticate                              |
 |----------|--------------------------------------------------|--------------------------------------------------|
-| Claude   | `claude auth status` or launch and check output  | `claude login` or set `ANTHROPIC_API_KEY`        |
-| Codex    | Launch and check for API key error                | Set `OPENAI_API_KEY` in environment              |
-| Gemini   | `gemini auth status` or launch and check output   | `gemini login` or set `GEMINI_API_KEY`           |
-| OpenCode | Launch and check for auth error                   | Set provider API key in `~/.config/opencode/opencode.json` |
+| Claude   | `claude auth status`                             | `claude login`                                   |
+| Codex    | Launch `codex` and confirm it runs authenticated  | `codex auth` (OAuth via browser)                 |
+| Gemini   | `gemini` — should show "Loaded cached credentials" | `gemini` on first run triggers OAuth login       |
+| OpenCode | Launch `opencode` and confirm it connects         | `opencode` on first run triggers OAuth login     |
 
 For each CLI:
 1. Run the auth check command
-2. If not authenticated, run the authentication command or set the required env var
+2. If not authenticated, launch the CLI to trigger OAuth login via browser
 3. Re-check to confirm authentication succeeded
 
 ### Step 3 — Check Wezterm

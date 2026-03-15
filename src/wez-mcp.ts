@@ -9,15 +9,13 @@
  */
 
 import { execSync, execFileSync, spawn as nodeSpawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, platform } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-
-const IS_WIN = process.platform === 'win32';
-const IS_MAC = process.platform === 'darwin';
+import { OS, sleepMs } from './platform.js';
 
 // ---------------------------------------------------------------------------
 // Server Configuration — resolved from env or CLI args
@@ -203,7 +201,7 @@ function captureManifest(): SessionManifest {
  * (codex, gemini) which show as "node" in ps output.
  */
 function getCliPid(ttyName: string, cli: string): string | null {
-  if (IS_WIN || !ttyName) return null;
+  if (OS.name === 'windows' || !ttyName) return null;
   const ttyShort = ttyName.replace('/dev/', '');
   try {
     const psOutput = execFileSync('ps', ['-t', ttyShort, '-o', 'pid,args'], {
@@ -394,7 +392,7 @@ function getSessionId(paneId: number, cli: string): string | null {
         ];
         // Try both slash variants on Windows (DB may store either format)
         const cwdVariants = [paneCwd];
-        if (IS_WIN) {
+        if (OS.name === 'windows') {
           const alt = paneCwd.includes('/') ? paneCwd.replace(/\//g, '\\') : paneCwd.replace(/\\/g, '/');
           if (alt !== paneCwd) cwdVariants.push(alt);
         }
@@ -451,8 +449,8 @@ function getSessionId(paneId: number, cli: string): string | null {
 function buildResumeCommand(cli: string, sessionId: string | null, cwd?: string): ResolvedCommand {
   const def = CLI_DEFS[cli];
   if (!def) {
-    const shell = IS_WIN ? 'cmd.exe' : 'bash';
-    return { parts: [shell], shellCommand: shell, needsShell: false };
+    const defaultShell = OS.name === 'windows' ? 'cmd.exe' : 'bash';
+    return { parts: [defaultShell], shellCommand: defaultShell, needsShell: false };
   }
   // Pre-trust the directory so the CLI doesn't prompt on resume
   if (cwd) ensureCliTrust(cli, cwd);
@@ -528,45 +526,15 @@ function buildResumeCommand(cli: string, sessionId: string | null, cwd?: string)
         appendFlags(base, '--resume', 'latest');
         return wrapWithFreshFallback(base, fresh);
       case 'codex': {
-        // codex resume is a subcommand, need to restructure
-        let resumeCmd: ResolvedCommand;
-        if (IS_WIN) {
-          const b64r1 = Buffer.from('codex').toString('base64');
-          const setVarR1 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64r1}\\x07')"`;
-          resumeCmd = {
-            parts: ['cmd.exe', '/c', `${setVarR1} && codex resume --last`],
-            shellCommand: 'codex resume --last',
-            needsShell: true,
-          };
-        } else {
-          resumeCmd = {
-            parts: ['codex', 'resume', '--last'],
-            shellCommand: 'codex resume --last',
-            needsShell: false,
-          };
-        }
+        const resumeCmd = OS.wrapCliForSpawn('codex', ['codex', 'resume', '--last']);
         return wrapWithFreshFallback(resumeCmd, fresh);
       }
       case 'opencode':
         appendFlags(base, '--continue');
         return wrapWithFreshFallback(base, fresh);
       case 'goose': {
-        let resumeCmd: ResolvedCommand;
-        if (IS_WIN) {
-          const b64g1 = Buffer.from('goose').toString('base64');
-          const setVarG1 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g1}\\x07')"`;
-          resumeCmd = {
-            parts: ['cmd.exe', '/c', `${setVarG1} && set GOOSE_MODE=auto && goose session --resume`],
-            shellCommand: 'set GOOSE_MODE=auto && goose session --resume',
-            needsShell: true,
-          };
-        } else {
-          resumeCmd = {
-            parts: ['bash', '-c', 'GOOSE_MODE=auto goose session --resume'],
-            shellCommand: 'GOOSE_MODE=auto goose session --resume',
-            needsShell: true,
-          };
-        }
+        const envCmd = `${OS.setEnvCmd('GOOSE_MODE', 'auto')} && goose session --resume`;
+        const resumeCmd = OS.wrapCliForSpawn('goose', OS.shellExec(envCmd));
         return wrapWithFreshFallback(resumeCmd, fresh);
       }
     }
@@ -584,46 +552,16 @@ function buildResumeCommand(cli: string, sessionId: string | null, cwd?: string)
       appendFlags(base, '--resume', 'latest');
       break;
     case 'codex':
-      if (IS_WIN) {
-        const b64r2 = Buffer.from('codex').toString('base64');
-        const setVarR2 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64r2}\\x07')"`;
-        return {
-          parts: ['cmd.exe', '/c', `${setVarR2} && codex resume ${validSessionId}`],
-          shellCommand: `codex resume ${validSessionId}`,
-          needsShell: true,
-        };
-      }
-      return {
-        parts: ['codex', 'resume', validSessionId],
-        shellCommand: `codex resume ${validSessionId}`,
-        needsShell: false,
-      };
+      return OS.wrapCliForSpawn('codex', ['codex', 'resume', validSessionId]);
     case 'opencode':
       appendFlags(base, '--session', validSessionId);
       break;
     case 'goose':
       if (base.needsShell) {
-        const b64g2 = Buffer.from('goose').toString('base64');
-          const setVarG2 = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g2}\\x07')"`;
-          const cmd = IS_WIN
-          ? { parts: ['cmd.exe', '/c', `${setVarG2} && set GOOSE_MODE=auto && goose session --resume --session-id ${validSessionId}`], shellCommand: `set GOOSE_MODE=auto && goose session --resume --session-id ${validSessionId}` }
-          : { parts: ['bash', '-c', `GOOSE_MODE=auto goose session --resume --session-id ${validSessionId}`], shellCommand: `GOOSE_MODE=auto goose session --resume --session-id ${validSessionId}` };
-        return { ...cmd, needsShell: true };
+        const envCmd = `${OS.setEnvCmd('GOOSE_MODE', 'auto')} && goose session --resume --session-id ${validSessionId}`;
+        return OS.wrapCliForSpawn('goose', OS.shellExec(envCmd));
       }
-      if (IS_WIN) {
-        const b64g2b = Buffer.from('goose').toString('base64');
-        const setVarG2b = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64g2b}\\x07')"`;
-        return {
-          parts: ['cmd.exe', '/c', `${setVarG2b} && goose session --resume --session-id ${validSessionId}`],
-          shellCommand: `goose session --resume --session-id ${validSessionId}`,
-          needsShell: true,
-        };
-      }
-      return {
-        parts: ['goose', 'session', '--resume', '--session-id', validSessionId],
-        shellCommand: `goose session --resume --session-id ${validSessionId}`,
-        needsShell: false,
-      };
+      return OS.wrapCliForSpawn('goose', ['goose', 'session', '--resume', '--session-id', validSessionId]);
   }
 
   return base;
@@ -673,8 +611,7 @@ function ensureCliTrust(cli: string, cwd: string): void {
     switch (def.trustSetup) {
       case 'claude': {
         // Claude Code trusts a directory once ~/.claude/projects/{encoded}/ exists.
-        // The encoded name replaces all '/' with '-' (e.g. /tmp/foo → -tmp-foo).
-        const encoded = cwd.replace(/\//g, '-');
+        const encoded = OS.encodeTrustPath(cwd);
         const projectDir = join(homedir(), '.claude', 'projects', encoded);
         mkdirSync(projectDir, { recursive: true });
         break;
@@ -736,15 +673,9 @@ type ResolvedCommand = {
 function wrapWithFreshFallback(resume: ResolvedCommand, fresh: ResolvedCommand): ResolvedCommand {
   const resumeInner = resume.needsShell ? resume.parts[2] : resume.parts.join(' ');
   const freshInner = fresh.needsShell ? fresh.parts[2] : fresh.parts.join(' ');
-  if (IS_WIN) {
-    return {
-      parts: ['cmd.exe', '/c', `(${resumeInner}) || (${freshInner})`],
-      shellCommand: `${resume.shellCommand} || ${fresh.shellCommand}`,
-      needsShell: true,
-    };
-  }
+  const fallbackCmd = `(${resumeInner}) || (${freshInner})`;
   return {
-    parts: ['bash', '-c', `${resumeInner} || ${freshInner}`],
+    parts: OS.shellExec(fallbackCmd),
     shellCommand: `${resume.shellCommand} || ${fresh.shellCommand}`,
     needsShell: true,
   };
@@ -767,78 +698,30 @@ function resolveCliCommand(cli: string, skipPermissions: boolean, cwd?: string):
 
   // If env vars are needed, we must run via shell wrapper
   if (skipPermissions && def.skipPermEnv && Object.keys(def.skipPermEnv).length > 0) {
-    if (IS_WIN) {
-      const setCommands = Object.entries(def.skipPermEnv)
-        .map(([k, v]) => `set ${k}=${v}`)
-        .join(' && ');
-      const shellCommand = `${setCommands} && ${parts.join(' ')}`;
-      const b64 = Buffer.from(cli).toString('base64');
-      const setUserVar = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64}\\x07')"`;
-      return {
-        parts: ['cmd.exe', '/c', `${setUserVar} && ${shellCommand}`],
-        shellCommand,
-        needsShell: true,
-      };
-    }
-    const envExports = Object.entries(def.skipPermEnv)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(' ');
-    const shellCommand = `${envExports} ${parts.join(' ')}`;
-    return {
-      parts: ['bash', '-c', shellCommand],
-      shellCommand,
-      needsShell: true,
-    };
+    const envParts = Object.entries(def.skipPermEnv)
+      .map(([k, v]) => OS.setEnvCmd(k, v));
+    const cmdStr = parts.join(' ');
+    const shellCommand = OS.name === 'windows'
+      ? `${envParts.join(' && ')} && ${cmdStr}`
+      : `${envParts.join(' ')} ${cmdStr}`;
+    return OS.wrapCliForSpawn(cli, OS.shellExec(shellCommand));
   }
 
-  // On Windows, npm-installed CLIs use .cmd wrappers that wezterm cannot
-  // execute directly.  Wrap them in cmd.exe /c so the shell resolves the .cmd.
-  // We also emit an OSC 1337 SetUserVar to tag the pane with its CLI type —
-  // the Lua format-tab-title callback reads p.user_vars.cli for detection,
-  // since some CLIs override the pane title to something non-identifiable.
-  if (IS_WIN && !def.bin.endsWith('.exe')) {
-    const shellCommand = parts.join(' ');
-    const b64 = Buffer.from(cli).toString('base64');
-    const setUserVar = `node -e "process.stdout.write('\\x1b]1337;SetUserVar=cli=${b64}\\x07')"`;
-    return {
-      parts: ['cmd.exe', '/c', `${setUserVar} && ${shellCommand}`],
-      shellCommand,
-      needsShell: true,
-    };
-  }
-
-  return {
-    parts,
-    shellCommand: parts.join(' '),
-    needsShell: false,
-  };
+  // Wrap for platform (Windows npm .cmd shims, OSC 1337 CLI tagging)
+  return OS.wrapCliForSpawn(cli, parts);
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function sleepMs(ms: number): void {
-  const end = Date.now() + ms;
-  while (Date.now() < end) { /* busy-wait — only used for short waits in sync code */ }
-}
+// sleepMs imported from ./platform.js
 
 /**
  * Check if wezterm binary exists on PATH or in common install locations.
  */
 function isWezInstalled(): boolean {
-  // Check common install path on Windows first (often not in PATH)
-  if (IS_WIN) {
-    const progFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';
-    if (existsSync(join(progFiles, 'WezTerm', 'wezterm.exe'))) return true;
-  }
-  try {
-    const cmd = IS_WIN ? 'where' : 'which';
-    execFileSync(cmd, ['wezterm'], { encoding: 'utf8', timeout: 3000, stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
+  return OS.isWezInstalled();
 }
 
 /**
@@ -858,16 +741,7 @@ function isWezRunning(): boolean {
  * Start wezterm GUI if not running. Returns true if it was started.
  */
 function isGuiRunning(): boolean {
-  try {
-    if (IS_WIN) {
-      const out = execSync('tasklist /FI "IMAGENAME eq wezterm-gui.exe" /NH', { encoding: 'utf8', timeout: 5000 });
-      return out.includes('wezterm-gui');
-    }
-    const out = execSync('pgrep -x wezterm-gui', { encoding: 'utf8', timeout: 3000 });
-    return out.trim().length > 0;
-  } catch {
-    return false;
-  }
+  return OS.isProcessRunning('wezterm-gui');
 }
 
 function ensureWezRunning(): { running: boolean; started: boolean } {
@@ -911,50 +785,22 @@ function ensureWezRunning(): { running: boolean; started: boolean } {
  * We prefer gui-sock-* over the default sock.
  */
 function findGuiSocket(): string | undefined {
-  let socketDir: string;
-  if (IS_WIN) {
-    // Windows stores socket files in ~/.local/share/wezterm/
-    // wezterm cli does NOT auto-discover them — we must set WEZTERM_UNIX_SOCKET
-    socketDir = join(homedir(), '.local', 'share', 'wezterm');
-  } else if (IS_MAC) {
-    socketDir = join(homedir(), '.local', 'share', 'wezterm');
-  } else {
-    socketDir = join('/run/user', String(process.getuid?.()), 'wezterm');
-  }
+  const socketDir = OS.socketDir();
   try {
     const entries = readdirSync(socketDir);
-    // Prefer gui-sock-* (the active GUI instance)
     const guiSock = entries.find(e => e.startsWith('gui-sock-'));
     if (guiSock) return join(socketDir, guiSock);
-    // Fallback to default sock
     if (entries.includes('sock')) return join(socketDir, 'sock');
   } catch { /* ignore */ }
   return undefined;
 }
 
 function weztermBin(): string {
-  if (IS_WIN) {
-    // Try common Windows install paths
-    const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';
-    const candidate = join(programFiles, 'WezTerm', 'wezterm.exe');
-    if (existsSync(candidate)) return candidate;
-  }
-  return 'wezterm';
+  return OS.weztermBin();
 }
 
-/** Resolve the wezterm-gui binary for direct launch (not the CLI wrapper). */
 function weztermGuiBin(): string {
-  if (IS_WIN) {
-    const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';
-    const candidate = join(programFiles, 'WezTerm', 'wezterm-gui.exe');
-    if (existsSync(candidate)) return candidate;
-  }
-  // On macOS, wezterm-gui is inside the app bundle
-  if (IS_MAC) {
-    const appBin = '/Applications/WezTerm.app/Contents/MacOS/wezterm-gui';
-    if (existsSync(appBin)) return appBin;
-  }
-  return 'wezterm-gui';
+  return OS.weztermGuiBin();
 }
 
 /**
@@ -997,14 +843,9 @@ function wezJson(...args: string[]): any {
   return JSON.parse(raw);
 }
 
-/** Normalize CWD from wezterm's file:// URI to a local path. Handles Windows drive letters. */
+/** Normalize CWD from wezterm's file:// URI to a local path. */
 function normalizeCwd(cwd: string): string {
-  let path = cwd.replace(/^file:\/\/[^/]*/, '');
-  // Windows: file:///C:/foo → /C:/foo — strip leading slash before drive letter
-  if (IS_WIN && /^\/[A-Za-z]:/.test(path)) {
-    path = path.slice(1);
-  }
-  return path.replace(/\/$/, '') || '/';
+  return OS.normalizeCwd(cwd);
 }
 
 /** Compare two paths ignoring slash direction and trailing slashes. */
@@ -1349,39 +1190,17 @@ server.tool(
     const file = filename ?? `wez-screenshot-${ts}.png`;
     const filePath = join(dir, file);
 
-    let tools: string[];
-    const shell: string | true = IS_WIN ? true as const : '/bin/bash';
-    if (IS_WIN) {
-      tools = [
-        `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $bmp = New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen(0,0,0,0,$bmp.Size); $bmp.Save('${filePath.replace(/'/g, "''")}'); $g.Dispose(); $bmp.Dispose()"`,
-      ];
-    } else if (IS_MAC) {
-      tools = [`screencapture -w "${filePath}"`];
-    } else {
-      tools = [
-        `import -window "$(xdotool getactivewindow 2>/dev/null || xprop -root _NET_ACTIVE_WINDOW | awk '{print $5}')" "${filePath}"`,
-        `scrot -u "${filePath}"`,
-        `grim -g "$(slurp)" "${filePath}"`,
-        `gnome-screenshot -w -f "${filePath}"`,
-      ];
-    }
-
+    const tools = OS.screenshotCmds(filePath);
     for (const cmd of tools) {
       try {
-        execSync(cmd, { timeout: 10_000, shell: shell as string, stdio: 'pipe' });
+        execSync(cmd, { timeout: 10_000, shell: OS.shell as string, stdio: 'pipe' });
         if (existsSync(filePath)) {
           return ok({ screenshot: filePath, tool: cmd.split(' ')[0] });
         }
       } catch { /* try next */ }
     }
 
-    return ok({
-      error: IS_WIN
-        ? 'Screenshot capture failed on Windows.'
-        : IS_MAC
-          ? 'Screenshot capture failed. Ensure screencapture is available.'
-          : 'No screenshot tool available. Install one of: imagemagick (import), scrot, grim, gnome-screenshot',
-    });
+    return ok({ error: OS.screenshotErrorMsg });
   },
 );
 
@@ -1411,24 +1230,10 @@ server.tool(
       const file = `wez-tab-${i + 1}-${ts}.png`;
       const filePath = join(dir, file);
 
-      let tools: string[];
-      const tabShell: string | true = IS_WIN ? true as const : '/bin/bash';
-      if (IS_WIN) {
-        tools = [
-          `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; $bmp = New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen(0,0,0,0,$bmp.Size); $bmp.Save('${filePath.replace(/'/g, "''")}'); $g.Dispose(); $bmp.Dispose()"`,
-        ];
-      } else if (IS_MAC) {
-        tools = [`screencapture -w "${filePath}"`];
-      } else {
-        tools = [
-          `import -window "$(xdotool getactivewindow 2>/dev/null || xprop -root _NET_ACTIVE_WINDOW | awk '{print $5}')" "${filePath}"`,
-          `scrot -u "${filePath}"`,
-        ];
-      }
-
+      const tools = OS.screenshotCmds(filePath);
       for (const cmd of tools) {
         try {
-          execSync(cmd, { timeout: 10_000, shell: tabShell as string, stdio: 'pipe' });
+          execSync(cmd, { timeout: 10_000, shell: OS.shell as string, stdio: 'pipe' });
           if (existsSync(filePath)) {
             screenshots.push({ tab_id: tabIds[i]!, path: filePath });
             break;
@@ -1463,7 +1268,7 @@ function queryAgentStatus(paneId: number): string | null {
     // Poll for response — wait up to 30 seconds
     // Look for ● lines that appear AFTER our STATUS_PROMPT in the output
     for (let i = 0; i < 30; i++) {
-      execSync('sleep 1', { timeout: 2000, shell: '/bin/bash' });
+      OS.sleep(1);
       const text = wez('get-text', '--pane-id', String(paneId));
 
       // Find our prompt in the output, then look for ● response lines after it
@@ -2227,17 +2032,10 @@ server.tool(
   {},
   async () => {
     try {
-      if (IS_WIN) {
-        execSync('powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(\'{F11}\')"', { timeout: 5000, stdio: 'pipe' });
-      } else if (IS_MAC) {
-        execSync('osascript -e \'tell application "System Events" to keystroke "f" using {control down, command down}\'', { timeout: 5000 });
-      } else {
-        execSync('xdotool key F11', { timeout: 5000 });
-      }
+      OS.toggleFullscreen();
       return ok({ toggled: true });
     } catch {
-      const hint = IS_WIN ? 'SendKeys failed.' : IS_MAC ? 'AppleScript failed.' : 'xdotool not available.';
-      return ok({ toggled: false, note: `${hint} Press F11 manually.` });
+      return ok({ toggled: false, note: OS.fullscreenErrorMsg });
     }
   },
 );
@@ -2319,44 +2117,22 @@ server.tool(
 
 /** Kill wezterm-gui process(es). */
 function killGuiProcess(): boolean {
-  try {
-    if (IS_WIN) {
-      execSync('taskkill /F /IM wezterm-gui.exe', { timeout: 5000, stdio: 'pipe' });
-    } else {
-      execSync('pkill -x wezterm-gui', { timeout: 3000 });
-    }
-    return true;
-  } catch { return false; }
+  try { OS.killProcess('wezterm-gui'); return true; } catch { return false; }
 }
 
 /** Kill wezterm-mux-server process(es). */
 function killMuxProcess(): boolean {
-  try {
-    if (IS_WIN) {
-      execSync('taskkill /F /IM wezterm-mux-server.exe', { timeout: 5000, stdio: 'pipe' });
-    } else {
-      execSync('pkill -x wezterm-mux-se', { timeout: 3000 });
-    }
-    return true;
-  } catch { return false; }
+  try { OS.killProcess('wezterm-mux-server'); return true; } catch { return false; }
 }
 
 /** Remove stale socket files from the socket directory. */
 function cleanSockets(): number {
   let cleaned = 0;
   try {
-    let socketDir: string;
-    if (IS_WIN) {
-      socketDir = join(homedir(), '.local', 'share', 'wezterm');
-    } else if (IS_MAC) {
-      socketDir = join(homedir(), '.local', 'share', 'wezterm');
-    } else {
-      socketDir = join('/run/user', String(process.getuid?.()), 'wezterm');
-    }
-    const { unlinkSync } = require('node:fs');
-    for (const entry of readdirSync(socketDir)) {
+    const dir = OS.socketDir();
+    for (const entry of readdirSync(dir)) {
       if (entry.startsWith('gui-sock-') || entry === 'sock') {
-        try { unlinkSync(join(socketDir, entry)); cleaned++; } catch { /* ignore */ }
+        try { unlinkSync(join(dir, entry)); cleaned++; } catch { /* ignore */ }
       }
     }
   } catch { /* ignore */ }
