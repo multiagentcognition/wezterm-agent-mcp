@@ -1,6 +1,6 @@
 {
   "name": "wezterm-agent-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "description": "Wezterm MCP Server — programmable terminal control plane for multi-agent AI workflows",
   "license": "PolyForm-Strict-1.0.0",

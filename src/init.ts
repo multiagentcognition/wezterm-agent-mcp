@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
+import { OS } from './platform.js';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -131,6 +133,13 @@ function writeOpenCodeJson(projectRoot: string, updatedFiles: string[]): void {
 // ---------------------------------------------------------------------------
 
 export function initProject(options: InitOptions = {}): InitResult {
+  if (!OS.isWezInstalled()) {
+    console.error(`Error: Wezterm is not installed or not found in PATH.
+
+Install Wezterm first: https://wezfurlong.org/wezterm/installation`);
+    process.exit(1);
+  }
+
   const projectRoot = resolve(options.projectRoot ?? process.cwd());
   const updatedFiles: string[] = [];
 
